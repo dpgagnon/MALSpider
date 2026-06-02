@@ -15,10 +15,8 @@ namespace MALSpider.Graph
     public class GraphRenderer
     {
         public Action<EntryNode>? OnNodeRetryRequested { get; set; }
-        public Action<string, bool>? OnLaneToggleRequested { get; set; }
 
         private readonly Canvas _graphCanvas;
-        private readonly Canvas _headerCanvas;
         private readonly Canvas _timeCanvas;
 
         public double NodeWidth { get; set; } = MALSpiderConstants.NodeWidth;
@@ -28,27 +26,14 @@ namespace MALSpider.Graph
         private readonly Dictionary<EntryNode, List<Shape>> _nodeToConnections = new();
         private readonly Dictionary<Shape, (EntryNode Source, EntryNode Target, bool IsDownward)> _connectionInfo = new();
 
-        private class HeaderInfo
-        {
-            public FrameworkElement Element { get; set; }
-            public FrameworkElement Underline { get; set; }
-            public CheckBox Toggle { get; set; }
-            public double PreferredX { get; set; }
-            public double LaneLeft { get; set; }
-            public double LaneRight { get; set; }
-        }
-        private readonly List<HeaderInfo> _headerInfos = new();
-
-        public GraphRenderer(Canvas graphCanvas, Canvas headerCanvas, Canvas timeCanvas)
+        public GraphRenderer(Canvas graphCanvas, Canvas timeCanvas)
         {
             _graphCanvas = graphCanvas;
-            _headerCanvas = headerCanvas;
             _timeCanvas = timeCanvas;
         }
 
         public void DrawGraph(NodeLayout layout)
         {
-            // Clear but preserve headers to avoid redundant animations and layout thrashing
             _graphCanvas.Children.Clear();
             _timeCanvas.Children.Clear();
             _nodeToBorder.Clear();
@@ -57,46 +42,6 @@ namespace MALSpider.Graph
 
             // 1. Draw Axis
             DrawTimeAxis(layout.MinDate, layout.MaxDate, layout.VisibleDates, date => layout.Compressor.GetY(date, 100, MALSpiderConstants.VerticalSpacing));
-
-            // 2. Draw/Update Headers
-            // Mark all headers as potentially for removal
-            var headersToRemove = _headerInfos.ToList();
-            _headerInfos.Clear();
-
-            foreach (var header in layout.LaneHeaders)
-            {
-                var existing = headersToRemove.FirstOrDefault(h =>
-                    (h.Element is StackPanel sp && sp.Children.OfType<TextBlock>().FirstOrDefault()?.Text == header.Title));
-
-                if (existing != null)
-                {
-                    headersToRemove.Remove(existing);
-                    existing.PreferredX = header.X;
-                    existing.LaneLeft = header.LaneLeft;
-                    existing.LaneRight = header.LaneRight;
-
-                    // Update toggle state without triggering event if possible,
-                    // or just let it be if it's already correct.
-                    if (existing.Toggle.IsChecked != header.IsVisible)
-                    {
-                        // Setting IsChecked directly avoids the Click event,
-                        // so we won't loop back to RenderGraph.
-                        existing.Toggle.IsChecked = header.IsVisible;
-                    }
-                    _headerInfos.Add(existing);
-                }
-                else
-                {
-                    DrawHeader(header.Title, header.X, header.IsVisible, header.LaneLeft, header.LaneRight);
-                }
-            }
-
-            // Remove headers that are no longer in the layout
-            foreach (var oldHeader in headersToRemove)
-            {
-                _headerCanvas.Children.Remove(oldHeader.Element);
-                _headerCanvas.Children.Remove(oldHeader.Underline);
-            }
 
             // 3. Draw Nodes
             foreach (var entry in layout.NodePositions)
@@ -137,37 +82,85 @@ namespace MALSpider.Graph
             // 5. Update canvas size
             UpdateCanvasSize(layout.MaxRight + MALSpiderConstants.CanvasWidthMargin, layout.MaxBottom + MALSpiderConstants.CanvasHeightMargin);
 
-            // 6. Draw Separators
+            // 6. Draw Lane Background Text
+            foreach (var header in layout.LaneHeaders)
+            {
+                // Draw background repeating text
+                DrawLaneBackgroundText(header.Title, header.LaneLeft, header.LaneRight);
+            }
+
+            // 7. Draw Separators
             foreach (var sepX in layout.SeparatorXPositions)
             {
                 DrawVerticalSeparator(sepX);
             }
         }
 
+        private void DrawLaneBackgroundText(string title, double left, double right)
+        {
+            double laneWidth = right - left;
+            double centerX = left + laneWidth / 2;
+
+            string displayText = title;
+            if (displayText.ToUpper() == "LIGHT NOVEL")
+            {
+                displayText = "LIGHT\nNOVEL";
+            }
+
+            // Repeating vertical text
+            double canvasHeight = _graphCanvas.Height;
+            if (double.IsNaN(canvasHeight)) canvasHeight = 3000;
+            else canvasHeight = Math.Max(3000, canvasHeight);
+
+            for (double y = 100; y < canvasHeight; y += 200)
+            {
+                var tb = new TextBlock
+                {
+                    Text = displayText,
+                    FontSize = 40,
+                    FontWeight = FontWeights.Black,
+                    Foreground = new SolidColorBrush(Color.FromArgb(40, 128, 128, 128)), // Brighter (alpha 40)
+                    IsHitTestVisible = false,
+                    TextAlignment = TextAlignment.Center,
+                    TextWrapping = TextWrapping.Wrap,
+                    Width = Math.Max(10, laneWidth - 20)
+                };
+
+                tb.Measure(new Size(tb.Width, double.PositiveInfinity));
+                Canvas.SetLeft(tb, centerX - tb.DesiredSize.Width / 2);
+                Canvas.SetTop(tb, y);
+                Panel.SetZIndex(tb, -100);
+                _graphCanvas.Children.Add(tb);
+            }
+        }
+
         public void DrawVerticalSeparator(double x)
         {
+            double height = _graphCanvas.Height;
+            if (double.IsNaN(height)) height = 1000;
+            else height = Math.Max(1000, height);
+
             var line = new Line
             {
                 X1 = x,
                 Y1 = 0,
                 X2 = x,
-                Y2 = _graphCanvas.Height,
-                Stroke = new SolidColorBrush(MALSpiderConstants.LaneSeparatorColor),
-                StrokeThickness = 2,
-                StrokeDashArray = new DoubleCollection { 4, 4 }
+                Y2 = height,
+                Stroke = new SolidColorBrush(MALSpiderConstants.PrimaryAccentColor),
+                StrokeThickness = 4,
+                Opacity = 0.3
             };
+            Panel.SetZIndex(line, -50);
             _graphCanvas.Children.Add(line);
         }
 
         public void Clear()
         {
             _graphCanvas.Children.Clear();
-            _headerCanvas.Children.Clear();
             _timeCanvas.Children.Clear();
             _nodeToBorder.Clear();
             _nodeToConnections.Clear();
             _connectionInfo.Clear();
-            _headerInfos.Clear();
         }
 
         public void UpdateCanvasSize(double width, double height)
@@ -179,146 +172,6 @@ namespace MALSpider.Graph
         public Border GetBorderForNode(EntryNode node)
         {
             return _nodeToBorder.TryGetValue(node, out var border) ? border : null;
-        }
-
-        public void DrawHeader(string text, double x, bool isChecked, double laneLeft, double laneRight)
-        {
-            var panel = new StackPanel
-            {
-                Width = MALSpiderConstants.NodeWidth,
-                Orientation = Orientation.Vertical,
-                Background = Brushes.Transparent // Ensure it has some hit-testable area if needed, but Null is also fine
-            };
-
-            var textBlock = new TextBlock
-            {
-                Text = text,
-                FontSize = MALSpiderConstants.HeaderFontSize,
-                FontWeight = FontWeights.Bold,
-                Foreground = Brushes.White,
-                TextAlignment = TextAlignment.Center,
-                Margin = new Thickness(0, 5, 0, 0)
-            };
-            panel.Children.Add(textBlock);
-
-            var toggle = new CheckBox
-            {
-                Style = (Style)Application.Current.MainWindow.FindResource("ModernToggleSwitch"),
-                IsChecked = isChecked,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 5, 0, 0),
-                Content = "Visible"
-            };
-            toggle.Click += (s, e) => {
-                if (toggle.IsChecked.HasValue)
-                    OnLaneToggleRequested?.Invoke(text, toggle.IsChecked.Value);
-            };
-            panel.Children.Add(toggle);
-
-            Canvas.SetLeft(panel, x);
-            Canvas.SetTop(panel, 5);
-            _headerCanvas.Children.Add(panel);
-
-            var line = new Line
-            {
-                X1 = 0,
-                Y1 = 75,
-                X2 = MALSpiderConstants.NodeWidth,
-                Y2 = 75,
-                Stroke = new SolidColorBrush(MALSpiderConstants.PrimaryAccentColor),
-                StrokeThickness = 2
-            };
-            Canvas.SetLeft(line, x);
-            _headerCanvas.Children.Add(line);
-
-            _headerInfos.Add(new HeaderInfo { Element = panel, Underline = line, Toggle = toggle, PreferredX = x, LaneLeft = laneLeft, LaneRight = laneRight });
-        }
-
-        public void UpdateHeaderPositions(double horizontalOffset, double viewportWidth, double currentScale = 1.0)
-        {
-            foreach (var info in _headerInfos)
-            {
-                double L = info.LaneLeft;
-                double R = info.LaneRight;
-
-                // Header width (fixed, usually doesn't need to scale if it's UI text)
-                // But let's use the constant to be consistent.
-                double headerWidth = MALSpiderConstants.NodeWidth;
-
-                // Target position in Viewport space:
-                // Center math: the lane boundaries L and R are in unscaled graph coordinates.
-                // We want the header centered over the scaled lane: (L + R) * currentScale / 2.
-                // Then we subtract horizontalOffset to get viewport space.
-                // Finally subtract (headerWidth / 2) to center the header itself.
-                double targetX = ((L + R) * currentScale / 2.0) - horizontalOffset - (headerWidth / 2.0);
-
-                // Ensure it doesn't go below 0 if horizontalOffset is small (e.g. at the far left)
-                // but actually targetX can be negative if it's off-screen to the left.
-
-                // Round targetX to avoid sub-pixel jitter during scroll/zoom
-                targetX = Math.Round(targetX);
-
-                // Constraints:
-                // 1. Stickiness: if the lane is wider than the viewport,
-                //    keep the header visible within the visible part of the lane.
-                double viewportWidthActual = viewportWidth;
-                double scaledLaneWidth = (R - L) * currentScale;
-
-                if (scaledLaneWidth > viewportWidthActual)
-                {
-                    // Viewport space bounds of the lane
-                    double laneViewportLeft = (L * currentScale) - horizontalOffset;
-                    double laneViewportRight = (R * currentScale) - horizontalOffset;
-
-                    // Clamp targetX so that the header stays within [laneViewportLeft, laneViewportRight - width]
-                    // AND stays within [0, viewportWidthActual - width]
-                    double minAllowedX = Math.Max(laneViewportLeft, 0);
-                    double maxAllowedX = Math.Min(laneViewportRight, viewportWidthActual) - headerWidth;
-
-                    // If maxAllowedX < minAllowedX, it means the visible part of the lane is smaller than the header.
-                    // In this case, we'll just center it as much as possible within the visible lane segment.
-                    if (maxAllowedX < minAllowedX)
-                    {
-                        targetX = (minAllowedX + maxAllowedX + headerWidth) / 2.0 - (headerWidth / 2.0);
-                    }
-                    else
-                    {
-                        if (targetX < minAllowedX) targetX = minAllowedX;
-                        if (targetX > maxAllowedX) targetX = maxAllowedX;
-                    }
-                }
-                // 2. If lane is narrower than viewport or fits.
-                else
-                {
-                    // Lane is narrower than viewport or fits.
-                    // Just ensure it doesn't go outside the lane's actual boundaries in viewport space.
-                    double laneViewportLeft = (L * currentScale) - horizontalOffset;
-                    double laneViewportRight = (R * currentScale) - horizontalOffset;
-
-                    // Centering math: targetX = laneCenterViewport - (headerWidth / 2)
-                    // We already calculated targetX above.
-                    // But we must clamp it to [laneViewportLeft, laneViewportRight - headerWidth]
-                    double minAllowedX = laneViewportLeft;
-                    double maxAllowedX = laneViewportRight - headerWidth;
-
-                    if (targetX < minAllowedX) targetX = minAllowedX;
-                    if (targetX > maxAllowedX) targetX = maxAllowedX;
-                }
-
-                Canvas.SetLeft(info.Element, targetX);
-                Canvas.SetLeft(info.Underline, targetX);
-
-                // Maintain header width
-                info.Element.Width = headerWidth;
-                if (info.Underline is Line underline)
-                {
-                    underline.X2 = headerWidth;
-                }
-                else
-                {
-                    info.Underline.Width = headerWidth;
-                }
-            }
         }
 
         public void DrawTimeAxis(DateTime minDate, DateTime maxDate, List<DateTime> visibleDates, Func<DateTime?, double> getYForDate)

@@ -41,16 +41,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        _renderer = new GraphRenderer(GraphCanvas, HeaderCanvas, TimeCanvas);
+        _renderer = new GraphRenderer(GraphCanvas, TimeCanvas);
         _renderer.OnNodeRetryRequested = async node => await RetryNode(node);
-        _renderer.OnLaneToggleRequested = (lane, isVisible) =>
-        {
-            if (lane == "LIGHT NOVEL") _showLN = isVisible;
-            else if (lane == "MANGA") _showManga = isVisible;
-            else if (lane == "ANIME") _showAnime = isVisible;
-            RenderGraph(null);
-            SaveSettings();
-        };
         _carousel = new GraphCarousel(LoadingCanvas, _renderer);
         _jikanService.OnNodeImageLoaded = node => Dispatcher.Invoke(() => RenderGraph(node));
         LoadSettings();
@@ -130,6 +122,11 @@ public partial class MainWindow : Window
                     _showLN = settings.ShowLN;
                     _showManga = settings.ShowManga;
                     _showAnime = settings.ShowAnime;
+
+                    LnToggle.IsChecked = _showLN;
+                    MangaToggle.IsChecked = _showManga;
+                    AnimeToggle.IsChecked = _showAnime;
+
                     if (settings.Zoom >= MALSpiderConstants.MinZoom && settings.Zoom <= MALSpiderConstants.MaxZoom)
                     {
                         ZoomSlider.Value = settings.Zoom;
@@ -191,7 +188,14 @@ public partial class MainWindow : Window
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
     {
-        _jikanService.ClearCache();
+        if (_currentRoot != null)
+        {
+            var allNodes = GraphLayoutEngine.GetAllNodes(_currentRoot);
+            foreach (var node in allNodes)
+            {
+                _jikanService.DeleteNodeCache(node);
+            }
+        }
         await StartSpider();
     }
 
@@ -371,27 +375,29 @@ public partial class MainWindow : Window
         List<EntryNode> nodesToLayout;
         if (_isSubGraphMode && _subGraphRoot != null)
         {
-            nodesToLayout = GraphLayoutEngine.GetConnectedNodes(_subGraphRoot);
+            nodesToLayout = GraphLayoutEngine.GetConnectedNodes(_subGraphRoot, allNodesSet.ToList());
             BackButton.Visibility = Visibility.Visible;
             SpiderButton.Visibility = Visibility.Collapsed;
+            GraphCanvas.Background = new SolidColorBrush(Color.FromRgb(11, 14, 20));
+            MainScrollViewer.Background = new SolidColorBrush(Color.FromRgb(11, 14, 20));
         }
         else
         {
             nodesToLayout = allNodesSet.ToList();
             BackButton.Visibility = Visibility.Collapsed;
             if (!_isCrawling) SpiderButton.Visibility = Visibility.Visible;
+            GraphCanvas.Background = new SolidColorBrush(Color.FromRgb(18, 18, 18));
+            MainScrollViewer.Background = new SolidColorBrush(Color.FromRgb(18, 18, 18));
         }
 
         var layout = GraphLayoutEngine.ComputeLayout(nodesToLayout, _renderer.NodeWidth, _renderer.NodeHeight, MALSpiderConstants.VerticalSpacing, _showLN, _showManga, _showAnime);
         _renderer.DrawGraph(layout);
-        _renderer.UpdateHeaderPositions(MainScrollViewer.HorizontalOffset, MainScrollViewer.ViewportWidth, GraphScale.ScaleX);
 
         if (layout.RootPos.X > 0 || layout.RootPos.Y > 0) ScrollToNode(layout.RootPos);
     }
 
     private void MainScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        _renderer?.UpdateHeaderPositions(e.HorizontalOffset, e.ViewportWidth, GraphScale.ScaleX);
         if (TimeTransform != null) TimeTransform.Y = -e.VerticalOffset;
     }
 
@@ -437,6 +443,14 @@ public partial class MainWindow : Window
             if (_isMmbPanning) { _mmbAnchorPoint = e.GetPosition(MainScrollViewer); MainScrollViewer.CaptureMouse(); Cursor = Cursors.ScrollAll; }
             else { MainScrollViewer.ReleaseMouseCapture(); Cursor = Cursors.Arrow; }
             e.Handled = true;
+        }
+        else if (e.ChangedButton == MouseButton.XButton1)
+        {
+            if (_isSubGraphMode)
+            {
+                BackButton_Click(this, new RoutedEventArgs());
+                e.Handled = true;
+            }
         }
         else if (_isMmbPanning && (e.ChangedButton == MouseButton.Left || e.ChangedButton == MouseButton.Right))
         {
@@ -585,14 +599,21 @@ public partial class MainWindow : Window
             // Forces layout update so ScrollViewer properties are current
             GraphCanvas.UpdateLayout();
             MainScrollViewer.UpdateLayout();
-
-            _renderer?.UpdateHeaderPositions(MainScrollViewer.HorizontalOffset, MainScrollViewer.ViewportWidth, e.NewValue);
         }
     }
 
     private void ResetZoom_Click(object sender, RoutedEventArgs e)
     {
         ZoomSlider.Value = 1.0;
+    }
+
+    private void LaneToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _showLN = LnToggle.IsChecked ?? true;
+        _showManga = MangaToggle.IsChecked ?? true;
+        _showAnime = AnimeToggle.IsChecked ?? true;
+        RenderGraph(null);
+        SaveSettings();
     }
 
     private void BackButton_Click(object sender, RoutedEventArgs e)

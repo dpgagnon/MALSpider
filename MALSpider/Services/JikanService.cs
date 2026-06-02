@@ -42,6 +42,34 @@ namespace MALSpider.Services
                 Directory.CreateDirectory(imgDir);
         }
 
+        public void DeleteNodeCache(EntryNode node)
+        {
+            try
+            {
+                string key = $"{node.Type}_{node.MalId}";
+                string cachePath = Path.Combine(MALSpiderConstants.CacheDirectory, $"{key}.json");
+                if (File.Exists(cachePath))
+                {
+                    File.Delete(cachePath);
+                }
+
+                // Also delete image cache
+                string imgDir = Path.Combine(MALSpiderConstants.CacheDirectory, "images");
+                if (Directory.Exists(imgDir))
+                {
+                    var files = Directory.GetFiles(imgDir, $"{key}.*");
+                    foreach (var file in files)
+                    {
+                        File.Delete(file);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[DEBUG_LOG] Failed to delete node cache: {ex.Message}");
+            }
+        }
+
         public void ClearCache()
         {
             try
@@ -365,6 +393,17 @@ namespace MALSpider.Services
             string key = $"{node.Type}_{node.MalId}";
             string cachePath = Path.Combine(MALSpiderConstants.CacheDirectory, $"{key}.json");
             if (File.Exists(cachePath)) File.Delete(cachePath);
+
+            // Also delete image cache
+            string imgDir = Path.Combine(MALSpiderConstants.CacheDirectory, "images");
+            if (Directory.Exists(imgDir))
+            {
+                var files = Directory.GetFiles(imgDir, $"{key}.*");
+                foreach (var file in files)
+                {
+                    File.Delete(file);
+                }
+            }
 
             node.ErrorMessage = null;
             node.IsRetrying = true;

@@ -478,10 +478,21 @@
         </Border>
 
         <Grid Grid.Row="1">
+            <!-- Fixed Sidebar for Toggles -->
+            <Border Width="110" HorizontalAlignment="Left" Background="#B31E1E1E" BorderBrush="#333333" BorderThickness="0,0,1,0" Panel.ZIndex="100">
+                <StackPanel Margin="10,20">
+                    <TextBlock Text="VISIBLE LANES" FontSize="11" FontWeight="Bold" Foreground="#666666" Margin="5,0,0,15"/>
+                    <CheckBox x:Name="LnToggle" Style="{StaticResource ModernToggleSwitch}" Content="Light Novel" Margin="0,0,0,15" IsChecked="True" Click="LaneToggle_Click"/>
+                    <CheckBox x:Name="MangaToggle" Style="{StaticResource ModernToggleSwitch}" Content="Manga" Margin="0,0,0,15" IsChecked="True" Click="LaneToggle_Click"/>
+                    <CheckBox x:Name="AnimeToggle" Style="{StaticResource ModernToggleSwitch}" Content="Anime" IsChecked="True" Click="LaneToggle_Click"/>
+                </StackPanel>
+            </Border>
+
             <ScrollViewer x:Name="MainScrollViewer" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                           PreviewMouseDown="ScrollViewer_MouseDown" PreviewMouseMove="ScrollViewer_MouseMove" PreviewMouseUp="ScrollViewer_MouseUp"
                           PreviewMouseWheel="ScrollViewer_PreviewMouseWheel"
-                          ScrollChanged="MainScrollViewer_ScrollChanged">
+                          ScrollChanged="MainScrollViewer_ScrollChanged"
+                          Padding="110,0,0,0">
                 <Canvas x:Name="GraphCanvas" Background="#121212" RenderTransformOrigin="0,0">
                     <Canvas.LayoutTransform>
                         <ScaleTransform x:Name="GraphScale" ScaleX="1.0" ScaleY="1.0"/>
@@ -489,32 +500,6 @@
                 </Canvas>
             </ScrollViewer>
 
-            <!-- Semi-transparent header background that doesn't block panning -->
-            <Border Height="80" VerticalAlignment="Top" Background="#E6121212" IsHitTestVisible="False">
-                <Border.Style>
-                    <Style TargetType="Border">
-                        <Setter Property="Margin" Value="0,0,12,0"/>
-                        <Style.Triggers>
-                            <DataTrigger Binding="{Binding ComputedVerticalScrollBarVisibility, ElementName=MainScrollViewer}" Value="Collapsed">
-                                <Setter Property="Margin" Value="0"/>
-                            </DataTrigger>
-                        </Style.Triggers>
-                    </Style>
-                </Border.Style>
-            </Border>
-
-            <Canvas x:Name="HeaderCanvas" Height="80" VerticalAlignment="Top" IsHitTestVisible="True" Background="{x:Null}">
-                <Canvas.Style>
-                    <Style TargetType="Canvas">
-                        <Setter Property="Margin" Value="0,0,12,0"/>
-                        <Style.Triggers>
-                            <DataTrigger Binding="{Binding ComputedVerticalScrollBarVisibility, ElementName=MainScrollViewer}" Value="Collapsed">
-                                <Setter Property="Margin" Value="0"/>
-                            </DataTrigger>
-                        </Style.Triggers>
-                    </Style>
-                </Canvas.Style>
-            </Canvas>
             <Canvas x:Name="LoadingCanvas" Visibility="Collapsed" IsHitTestVisible="False" Background="#121212" ClipToBounds="True"/>
             <Grid HorizontalAlignment="Right" Width="55" IsHitTestVisible="False" ClipToBounds="True" Background="#B3121212">
                 <Grid.Style>

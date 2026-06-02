@@ -51,25 +51,53 @@ namespace MALSpider.Graph
             return visited.ToList();
         }
 
-        public static List<EntryNode> GetConnectedNodes(EntryNode root, int maxDepth = 1)
+        public static List<EntryNode> GetConnectedNodes(EntryNode root, List<EntryNode> allNodes)
+        {
+            // Use the layout logic to determine which nodes are visually connected to this root.
+            // We'll compute a temporary layout to get the VisualRelations.
+            // This ensures the subgraph matches what's actually drawn.
+            var layout = ComputeLayout(allNodes,
+                                      MALSpiderConstants.NodeWidth,
+                                      MALSpiderConstants.NodeHeight,
+                                      MALSpiderConstants.VerticalSpacing,
+                                      true, true, true);
+
+            var connected = new HashSet<EntryNode>();
+            connected.Add(root);
+
+            foreach (var rel in layout.VisualRelations)
+            {
+                if (rel.Source == root) connected.Add(rel.Target);
+                if (rel.Target == root) connected.Add(rel.Source);
+            }
+
+            return connected.ToList();
+        }
+
+        public static List<EntryNode> GetConnectedNodesBidirectional(EntryNode root, List<EntryNode> allNodes, int maxDepth = 1)
         {
             var visited = new HashSet<EntryNode>();
-            var queue = new Queue<(EntryNode Node, int Depth)>();
-            queue.Enqueue((root, 0));
             visited.Add(root);
 
-            while (queue.Count > 0)
+            // Outgoing
+            lock (root.Relations)
             {
-                var (node, depth) = queue.Dequeue();
-                if (depth >= maxDepth) continue;
-
-                lock (node.Relations)
+                foreach (var rel in root.Relations)
                 {
-                    foreach (var rel in node.Relations)
+                    visited.Add(rel.Target);
+                }
+            }
+
+            // Incoming (requires searching allNodes)
+            if (allNodes != null)
+            {
+                foreach (var other in allNodes)
+                {
+                    lock (other.Relations)
                     {
-                        if (visited.Add(rel.Target))
+                        if (other.Relations.Any(r => r.Target == root))
                         {
-                            queue.Enqueue((rel.Target, depth + 1));
+                            visited.Add(other);
                         }
                     }
                 }
@@ -350,18 +378,6 @@ namespace MALSpider.Graph
                         currentX = columnMaxX + nodeWidth + MALSpiderConstants.HorizontalGap;
                         layout.SeparatorXPositions.Add(currentX - MALSpiderConstants.HorizontalGap / 2);
                     }
-                    else
-                    {
-                        layout.LaneHeaders.Add((group.Title, currentX, group.IsVisible, currentX, currentX + nodeWidth));
-                        currentX += nodeWidth + MALSpiderConstants.HorizontalGap;
-                        layout.SeparatorXPositions.Add(currentX - MALSpiderConstants.HorizontalGap / 2);
-                    }
-                }
-                else
-                {
-                    layout.LaneHeaders.Add((group.Title, currentX, group.IsVisible, currentX, currentX + nodeWidth));
-                    currentX += nodeWidth + MALSpiderConstants.HorizontalGap;
-                    layout.SeparatorXPositions.Add(currentX - MALSpiderConstants.HorizontalGap / 2);
                 }
             }
 
