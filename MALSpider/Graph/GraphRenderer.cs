@@ -27,7 +27,17 @@ namespace MALSpider.Graph
         private readonly Dictionary<EntryNode, Border> _nodeToBorder = new();
         private readonly Dictionary<EntryNode, List<Shape>> _nodeToConnections = new();
         private readonly Dictionary<Shape, (EntryNode Source, EntryNode Target, bool IsDownward)> _connectionInfo = new();
-        private readonly List<(FrameworkElement Element, FrameworkElement Underline, double PreferredX, double LaneLeft, double LaneRight)> _headerInfos = new();
+
+        private class HeaderInfo
+        {
+            public FrameworkElement Element { get; set; }
+            public FrameworkElement Underline { get; set; }
+            public CheckBox Toggle { get; set; }
+            public double PreferredX { get; set; }
+            public double LaneLeft { get; set; }
+            public double LaneRight { get; set; }
+        }
+        private readonly List<HeaderInfo> _headerInfos = new();
 
         public GraphRenderer(Canvas graphCanvas, Canvas headerCanvas, Canvas timeCanvas)
         {
@@ -38,15 +48,54 @@ namespace MALSpider.Graph
 
         public void DrawGraph(NodeLayout layout)
         {
-            Clear();
+            // Clear but preserve headers to avoid redundant animations and layout thrashing
+            _graphCanvas.Children.Clear();
+            _timeCanvas.Children.Clear();
+            _nodeToBorder.Clear();
+            _nodeToConnections.Clear();
+            _connectionInfo.Clear();
 
             // 1. Draw Axis
             DrawTimeAxis(layout.MinDate, layout.MaxDate, layout.VisibleDates, date => layout.Compressor.GetY(date, 100, MALSpiderConstants.VerticalSpacing));
 
-            // 2. Draw Headers
+            // 2. Draw/Update Headers
+            // Mark all headers as potentially for removal
+            var headersToRemove = _headerInfos.ToList();
+            _headerInfos.Clear();
+
             foreach (var header in layout.LaneHeaders)
             {
-                DrawHeader(header.Title, header.X, header.IsVisible, header.LaneLeft, header.LaneRight);
+                var existing = headersToRemove.FirstOrDefault(h =>
+                    (h.Element is StackPanel sp && sp.Children.OfType<TextBlock>().FirstOrDefault()?.Text == header.Title));
+
+                if (existing != null)
+                {
+                    headersToRemove.Remove(existing);
+                    existing.PreferredX = header.X;
+                    existing.LaneLeft = header.LaneLeft;
+                    existing.LaneRight = header.LaneRight;
+
+                    // Update toggle state without triggering event if possible,
+                    // or just let it be if it's already correct.
+                    if (existing.Toggle.IsChecked != header.IsVisible)
+                    {
+                        // Setting IsChecked directly avoids the Click event,
+                        // so we won't loop back to RenderGraph.
+                        existing.Toggle.IsChecked = header.IsVisible;
+                    }
+                    _headerInfos.Add(existing);
+                }
+                else
+                {
+                    DrawHeader(header.Title, header.X, header.IsVisible, header.LaneLeft, header.LaneRight);
+                }
+            }
+
+            // Remove headers that are no longer in the layout
+            foreach (var oldHeader in headersToRemove)
+            {
+                _headerCanvas.Children.Remove(oldHeader.Element);
+                _headerCanvas.Children.Remove(oldHeader.Underline);
             }
 
             // 3. Draw Nodes
@@ -67,9 +116,9 @@ namespace MALSpider.Graph
                 {
                     var targetNode = rel.Target;
                     var targetPos = layout.NodePositions[targetNode];
-                    bool useSideAnchors = (sourcePos.Y + NodeHeight) > targetPos.Y;
+                    bool useSideAnchors = (sourcePos.Y + NodeHeight) > targetPos.Y || Math.Abs(sourcePos.X - targetPos.X) > 10;
 
-                    if (sourceNode.Lane == targetNode.Lane && useSideAnchors)
+                    if (useSideAnchors)
                     {
                         horizontalTargets.Add((targetPos, rel.Label, targetNode));
                     }
@@ -138,7 +187,7 @@ namespace MALSpider.Graph
             {
                 Width = MALSpiderConstants.NodeWidth,
                 Orientation = Orientation.Vertical,
-                HorizontalAlignment = HorizontalAlignment.Center
+                Background = Brushes.Transparent // Ensure it has some hit-testable area if needed, but Null is also fine
             };
 
             var textBlock = new TextBlock
@@ -160,8 +209,10 @@ namespace MALSpider.Graph
                 Margin = new Thickness(0, 5, 0, 0),
                 Content = "Visible"
             };
-            toggle.Checked += (s, e) => OnLaneToggleRequested?.Invoke(text, true);
-            toggle.Unchecked += (s, e) => OnLaneToggleRequested?.Invoke(text, false);
+            toggle.Click += (s, e) => {
+                if (toggle.IsChecked.HasValue)
+                    OnLaneToggleRequested?.Invoke(text, toggle.IsChecked.Value);
+            };
             panel.Children.Add(toggle);
 
             Canvas.SetLeft(panel, x);
@@ -180,49 +231,93 @@ namespace MALSpider.Graph
             Canvas.SetLeft(line, x);
             _headerCanvas.Children.Add(line);
 
-            _headerInfos.Add((panel, line, x, laneLeft, laneRight));
+            _headerInfos.Add(new HeaderInfo { Element = panel, Underline = line, Toggle = toggle, PreferredX = x, LaneLeft = laneLeft, LaneRight = laneRight });
         }
 
-        public void UpdateHeaderPositions(double horizontalOffset, double viewportWidth)
+        public void UpdateHeaderPositions(double horizontalOffset, double viewportWidth, double currentScale = 1.0)
         {
             foreach (var info in _headerInfos)
             {
-                double headerWidth = MALSpiderConstants.NodeWidth;
-
-                // Absolute preferred position
-                double prefX = info.PreferredX;
-
-                // Boundaries in absolute coordinates
                 double L = info.LaneLeft;
                 double R = info.LaneRight;
 
-                // Relative positions in viewport
-                double xInViewport = prefX - horizontalOffset;
-                double minX = L - horizontalOffset;
-                double maxX = R - headerWidth - horizontalOffset;
+                // Header width (fixed, usually doesn't need to scale if it's UI text)
+                // But let's use the constant to be consistent.
+                double headerWidth = MALSpiderConstants.NodeWidth;
 
-                // Stickiness logic:
-                // Stay within viewport [0, viewportWidth - headerWidth]
-                // but never go outside lane boundaries [minX, maxX]
+                // Target position in Viewport space:
+                // Center math: the lane boundaries L and R are in unscaled graph coordinates.
+                // We want the header centered over the scaled lane: (L + R) * currentScale / 2.
+                // Then we subtract horizontalOffset to get viewport space.
+                // Finally subtract (headerWidth / 2) to center the header itself.
+                double targetX = ((L + R) * currentScale / 2.0) - horizontalOffset - (headerWidth / 2.0);
 
-                double targetX = xInViewport;
+                // Ensure it doesn't go below 0 if horizontalOffset is small (e.g. at the far left)
+                // but actually targetX can be negative if it's off-screen to the left.
 
-                // If lane content is smaller than viewport, keep header at prefX relative to graph (centered over lane)
-                // If lane content is larger than viewport, then apply stickiness logic
+                // Round targetX to avoid sub-pixel jitter during scroll/zoom
+                targetX = Math.Round(targetX);
 
-                bool laneWiderThanViewport = (R - L) > viewportWidth;
+                // Constraints:
+                // 1. Stickiness: if the lane is wider than the viewport,
+                //    keep the header visible within the visible part of the lane.
+                double viewportWidthActual = viewportWidth;
+                double scaledLaneWidth = (R - L) * currentScale;
 
-                // Apply stickiness to viewport edges ONLY if it doesn't move it outside its lane
-                if (targetX < 0) targetX = 0;
-                if (targetX > viewportWidth - headerWidth) targetX = viewportWidth - headerWidth;
+                if (scaledLaneWidth > viewportWidthActual)
+                {
+                    // Viewport space bounds of the lane
+                    double laneViewportLeft = (L * currentScale) - horizontalOffset;
+                    double laneViewportRight = (R * currentScale) - horizontalOffset;
 
-                // Respect lane boundaries
-                // Clamp targetX to [minX, maxX]
-                if (targetX < minX) targetX = minX;
-                if (targetX > maxX) targetX = maxX;
+                    // Clamp targetX so that the header stays within [laneViewportLeft, laneViewportRight - width]
+                    // AND stays within [0, viewportWidthActual - width]
+                    double minAllowedX = Math.Max(laneViewportLeft, 0);
+                    double maxAllowedX = Math.Min(laneViewportRight, viewportWidthActual) - headerWidth;
+
+                    // If maxAllowedX < minAllowedX, it means the visible part of the lane is smaller than the header.
+                    // In this case, we'll just center it as much as possible within the visible lane segment.
+                    if (maxAllowedX < minAllowedX)
+                    {
+                        targetX = (minAllowedX + maxAllowedX + headerWidth) / 2.0 - (headerWidth / 2.0);
+                    }
+                    else
+                    {
+                        if (targetX < minAllowedX) targetX = minAllowedX;
+                        if (targetX > maxAllowedX) targetX = maxAllowedX;
+                    }
+                }
+                // 2. If lane is narrower than viewport or fits.
+                else
+                {
+                    // Lane is narrower than viewport or fits.
+                    // Just ensure it doesn't go outside the lane's actual boundaries in viewport space.
+                    double laneViewportLeft = (L * currentScale) - horizontalOffset;
+                    double laneViewportRight = (R * currentScale) - horizontalOffset;
+
+                    // Centering math: targetX = laneCenterViewport - (headerWidth / 2)
+                    // We already calculated targetX above.
+                    // But we must clamp it to [laneViewportLeft, laneViewportRight - headerWidth]
+                    double minAllowedX = laneViewportLeft;
+                    double maxAllowedX = laneViewportRight - headerWidth;
+
+                    if (targetX < minAllowedX) targetX = minAllowedX;
+                    if (targetX > maxAllowedX) targetX = maxAllowedX;
+                }
 
                 Canvas.SetLeft(info.Element, targetX);
                 Canvas.SetLeft(info.Underline, targetX);
+
+                // Maintain header width
+                info.Element.Width = headerWidth;
+                if (info.Underline is Line underline)
+                {
+                    underline.X2 = headerWidth;
+                }
+                else
+                {
+                    info.Underline.Width = headerWidth;
+                }
             }
         }
 
@@ -364,21 +459,6 @@ namespace MALSpider.Graph
                 }
             };
 
-            border.MouseDown += (s, e) =>
-            {
-                if (!string.IsNullOrEmpty(node.MalUrl))
-                {
-                    try
-                    {
-                        Process.Start(new ProcessStartInfo(node.MalUrl) { UseShellExecute = true });
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.WriteLine($"Failed to open URL: {ex.Message}");
-                    }
-                }
-            };
-
             border.MouseEnter += Node_MouseEnter;
             border.MouseLeave += Node_MouseLeave;
 
@@ -498,6 +578,67 @@ namespace MALSpider.Graph
             if (sender is Border border && border.Tag is EntryNode node)
             {
                 HighlightNode(node, true);
+
+                // Set tooltip content
+                var tooltipPanel = new StackPanel { MaxWidth = 400 };
+
+                tooltipPanel.Children.Add(new TextBlock
+                {
+                    Text = node.Title,
+                    FontWeight = FontWeights.Bold,
+                    FontSize = 16,
+                    Foreground = new SolidColorBrush(MALSpiderConstants.PrimaryAccentColor),
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(0,0,0, (string.IsNullOrWhiteSpace(node.TitleRomaji) || node.TitleRomaji == node.Title) ? 5 : 0)
+                });
+
+                if (!string.IsNullOrWhiteSpace(node.TitleRomaji) && node.TitleRomaji != node.Title)
+                {
+                    tooltipPanel.Children.Add(new TextBlock
+                    {
+                        Text = node.TitleRomaji,
+                        FontSize = 12,
+                        Foreground = Brushes.LightSlateGray,
+                        TextWrapping = TextWrapping.Wrap,
+                        Margin = new Thickness(0, 0, 0, 5)
+                    });
+                }
+
+                if (!string.IsNullOrEmpty(node.SourceType))
+                {
+                    tooltipPanel.Children.Add(new TextBlock
+                    {
+                        Text = $"Type: {node.SourceType}",
+                        FontSize = 12,
+                        Foreground = Brushes.Gray,
+                        Margin = new Thickness(0,0,0,3)
+                    });
+                }
+
+                if (node.ReleaseDate.HasValue)
+                {
+                    tooltipPanel.Children.Add(new TextBlock
+                    {
+                        Text = $"Released: {node.ReleaseDate.Value:MMM yyyy}",
+                        FontSize = 12,
+                        Foreground = Brushes.LightGray,
+                        Margin = new Thickness(0,0,0,8)
+                    });
+                }
+
+                if (!string.IsNullOrEmpty(node.Synopsis))
+                {
+                    tooltipPanel.Children.Add(new TextBlock
+                    {
+                        Text = node.Synopsis,
+                        FontSize = 13,
+                        Foreground = Brushes.White,
+                        TextWrapping = TextWrapping.Wrap,
+                        LineHeight = 18
+                    });
+                }
+
+                border.ToolTip = new ToolTip { Content = tooltipPanel };
             }
         }
 

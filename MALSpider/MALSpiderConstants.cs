@@ -137,6 +137,19 @@ namespace MALSpider
         // --- Relation Filtering ---
         public static readonly string[] ExcludedRelationTypes = { "Other", "Character" };
 
+        /// <summary>
+        /// Relation types that should cause a horizontal shift instead of vertical alignment.
+        /// Only "Sequel" (and implicitly "Prequel") relations usually stay vertical.
+        /// </summary>
+        public static readonly string[] HorizontalRelationTypes = 
+        { 
+            "Side story", 
+            "Spin-off", 
+            "Alternative version", 
+            "Alternative setting", 
+            "Other" 
+        };
+
         // --- DWM Constants for Dark Mode Title Bar ---
         public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
         public const int DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;

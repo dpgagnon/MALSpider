@@ -311,6 +311,112 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <Style x:Key="SliderThumbStyle" TargetType="Thumb">
+            <Setter Property="SnapsToDevicePixels" Value="true" />
+            <Setter Property="OverridesDefaultStyle" Value="true" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Ellipse Name="Ellipse" Fill="#BB86FC" Stroke="#BB86FC" StrokeThickness="1" Width="14" Height="14" />
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Ellipse" Property="Fill" Value="White" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ModernSlider" TargetType="Slider">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Slider">
+                        <Grid>
+                            <Border Name="TrackBackground" Background="#333333" Height="4" CornerRadius="2" VerticalAlignment="Center" Margin="5,0" />
+                            <Track Name="PART_Track">
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource SliderThumbStyle}" />
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ModernProgressBar" TargetType="ProgressBar">
+            <Setter Property="Background" Value="#333333"/>
+            <Setter Property="Foreground" Value="#BB86FC"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ProgressBar">
+                        <Grid x:Name="TemplateRoot">
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Determinate"/>
+                                    <VisualState x:Name="Indeterminate">
+                                        <Storyboard RepeatBehavior="Forever">
+                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="Animation" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)">
+                                                <EasingDoubleKeyFrame KeyTime="0" Value="0.25"/>
+                                                <EasingDoubleKeyFrame KeyTime="0:0:1" Value="0.25"/>
+                                                <EasingDoubleKeyFrame KeyTime="0:0:2" Value="0.25"/>
+                                            </DoubleAnimationUsingKeyFrames>
+                                            <PointAnimationUsingKeyFrames Storyboard.TargetName="Animation" Storyboard.TargetProperty="(UIElement.RenderTransformOrigin)">
+                                                <EasingPointKeyFrame KeyTime="0" Value="-0.5,0.5"/>
+                                                <EasingPointKeyFrame KeyTime="0:0:1" Value="0.5,0.5"/>
+                                                <EasingPointKeyFrame KeyTime="0:0:2" Value="1.5,0.5"/>
+                                            </PointAnimationUsingKeyFrames>
+                                        </Storyboard>
+                                    </VisualState>
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+                            <Border Background="{TemplateBinding Background}" CornerRadius="7"/>
+                            <Rectangle x:Name="PART_Track"/>
+                            <Grid x:Name="PART_Indicator" HorizontalAlignment="Left">
+                                <Border x:Name="Indicator" Background="{TemplateBinding Foreground}" CornerRadius="7"/>
+                                <Border x:Name="Animation" Background="{TemplateBinding Foreground}" CornerRadius="7" RenderTransformOrigin="0.5,0.5">
+                                    <Border.RenderTransform>
+                                        <TransformGroup>
+                                            <ScaleTransform/>
+                                            <SkewTransform/>
+                                            <RotateTransform/>
+                                            <TranslateTransform/>
+                                        </TransformGroup>
+                                    </Border.RenderTransform>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="ToolTip">
+            <Setter Property="Background" Value="#252525"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#BB86FC"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="HasDropShadow" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToolTip">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="8"
+                                Padding="{TemplateBinding Padding}"
+                                MaxWidth="400">
+                            <ContentPresenter />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Window.Icon>
@@ -354,6 +460,12 @@
                         <StackPanel Orientation="Horizontal">
                             <Rectangle Fill="White" Width="12" Height="12" Margin="0,0,8,0"/>
                             <TextBlock Text="STOP" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="BackButton" Grid.Column="2" Click="BackButton_Click" Style="{StaticResource ModernButton}" Margin="15,0,0,0" Padding="15,8" Visibility="Collapsed" Background="#004D40">
+                        <StackPanel Orientation="Horizontal">
+                            <Path Data="M20,11H7.83l5.59-5.59L12,4l-8,8l8,8l1.41-1.41L7.83,13H20V11z" Fill="White" Stretch="Uniform" Width="16" Height="16" Margin="0,0,8,0"/>
+                            <TextBlock Text="BACK TO MAIN" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Button>
                     <Button Grid.Column="3" Click="RefreshButton_Click" Style="{StaticResource ModernButton}" Margin="10,0,0,0" Padding="12,8" ToolTip="Clear cache and re-crawl">
@@ -462,18 +574,20 @@
             <StatusBarItem Grid.Column="1">
                 <StackPanel Orientation="Horizontal" Margin="0,0,10,0">
                     <TextBlock Text="Zoom:" VerticalAlignment="Center" Foreground="#B0B0B0" FontSize="12" Margin="0,0,5,0"/>
-                    <Slider x:Name="ZoomSlider" Width="100" VerticalAlignment="Center"
+                    <Slider x:Name="ZoomSlider" Width="120" VerticalAlignment="Center"
                             Minimum="{x:Static local:MALSpiderConstants.MinZoom}"
                             Maximum="{x:Static local:MALSpiderConstants.MaxZoom}"
                             Value="1.0"
-                            SmallChange="0.1" LargeChange="0.2"
+                            SmallChange="0.05" LargeChange="0.1"
+                            Style="{StaticResource ModernSlider}"
                             ValueChanged="ZoomSlider_ValueChanged"/>
                     <TextBlock Text="{Binding Value, ElementName=ZoomSlider, StringFormat={}{0:P0}}"
-                               Width="40" VerticalAlignment="Center" Foreground="#B0B0B0" FontSize="12" Margin="5,0,0,0"/>
+                               Width="40" VerticalAlignment="Center" Foreground="#BB86FC" FontWeight="Bold" FontSize="12" Margin="5,0,0,0"/>
+                    <Button Content="Reset" Click="ResetZoom_Click" Style="{StaticResource ModernButton}" Padding="8,2" FontSize="11" Margin="5,0,0,0"/>
                 </StackPanel>
             </StatusBarItem>
-            <StatusBarItem Grid.Column="2">
-                <ProgressBar x:Name="WorkProgressBar" Width="200" Height="16" Visibility="Collapsed" Minimum="0" Maximum="100"/>
+            <StatusBarItem Grid.Column="2" Margin="0,0,10,0">
+                <ProgressBar x:Name="WorkProgressBar" Width="150" Height="14" Visibility="Collapsed" Minimum="0" Maximum="100" Style="{StaticResource ModernProgressBar}"/>
             </StatusBarItem>
         </StatusBar>
     </Grid>

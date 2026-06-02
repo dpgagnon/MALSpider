@@ -144,6 +144,7 @@ namespace MALSpider.Models
         public string SourceType { get; set; } // e.g. "TV", "Movie", "Manga", "Light Novel"
         public string Title { get; set; }
         public string TitleEnglish { get; set; }
+        public string TitleRomaji { get; set; }
         public string TitleJapanese { get; set; }
         public string ImageUrl { get; set; }
         public BitmapSource? LoadedImage { get; set; }

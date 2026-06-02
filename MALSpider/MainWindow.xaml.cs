@@ -111,8 +111,13 @@ public partial class MainWindow : Window
                 var settings = JsonSerializer.Deserialize<WindowSettings>(json);
                 if (settings != null)
                 {
-                    Width = settings.Width;
-                    Height = settings.Height;
+                    if (settings.Width > 0 && settings.Height > 0)
+                    {
+                        Width = settings.Width;
+                        Height = settings.Height;
+                        Left = settings.Left;
+                        Top = settings.Top;
+                    }
                     WindowState = settings.WindowState;
                     if (settings.SearchHistory != null)
                     {
@@ -142,8 +147,10 @@ public partial class MainWindow : Window
             var history = SearchBox.ItemsSource as List<string> ?? new List<string>();
             var settings = new WindowSettings
             {
-                Width = Width,
-                Height = Height,
+                Width = WindowState == WindowState.Normal ? Width : RestoreBounds.Width,
+                Height = WindowState == WindowState.Normal ? Height : RestoreBounds.Height,
+                Left = WindowState == WindowState.Normal ? Left : RestoreBounds.Left,
+                Top = WindowState == WindowState.Normal ? Top : RestoreBounds.Top,
                 WindowState = WindowState,
                 SearchHistory = history,
                 ShowLN = _showLN,
@@ -167,6 +174,8 @@ public partial class MainWindow : Window
     {
         public double Width { get; set; }
         public double Height { get; set; }
+        public double Left { get; set; }
+        public double Top { get; set; }
         public WindowState WindowState { get; set; }
         public List<string> SearchHistory { get; set; } = new();
         public bool ShowLN { get; set; } = true;
@@ -238,6 +247,9 @@ public partial class MainWindow : Window
         _renderer.Clear();
         _carousel.Clear();
         _currentRoot = null;
+        _subGraphRoot = null;
+        _isSubGraphMode = false;
+        BackButton.Visibility = Visibility.Collapsed;
         lock (_progressiveNodes)
         {
             _progressiveNodes.Clear();
@@ -253,7 +265,7 @@ public partial class MainWindow : Window
                 if (s.Contains("/"))
                 {
                     var parts = s.Split(':')[0].Split('/');
-                    if (parts.Length == 2 && double.TryParse(parts[0], out var visitedCount) && double.TryParse(parts[1], out var totalCount))
+                    if (parts.Length == 2 && double.TryParse(parts[0], out var visitedCount) && double.TryParse(parts[1], out var totalCount) && totalCount > 0)
                     {
                         WorkProgressBar.Value = (visitedCount / totalCount) * 100;
                     }
@@ -303,6 +315,8 @@ public partial class MainWindow : Window
     }
 
     private EntryNode? _currentRoot;
+    private EntryNode? _subGraphRoot;
+    private bool _isSubGraphMode;
     private readonly HashSet<EntryNode> _progressiveNodes = new();
     private DateTime _lastRenderTime = DateTime.MinValue;
 
@@ -354,16 +368,30 @@ public partial class MainWindow : Window
         var traversedNodes = GraphLayoutEngine.GetAllNodes(_currentRoot);
         foreach (var node in traversedNodes) allNodesSet.Add(node);
 
-        var layout = GraphLayoutEngine.ComputeLayout(allNodesSet.ToList(), _renderer.NodeWidth, _renderer.NodeHeight, MALSpiderConstants.VerticalSpacing, _showLN, _showManga, _showAnime);
+        List<EntryNode> nodesToLayout;
+        if (_isSubGraphMode && _subGraphRoot != null)
+        {
+            nodesToLayout = GraphLayoutEngine.GetConnectedNodes(_subGraphRoot);
+            BackButton.Visibility = Visibility.Visible;
+            SpiderButton.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            nodesToLayout = allNodesSet.ToList();
+            BackButton.Visibility = Visibility.Collapsed;
+            if (!_isCrawling) SpiderButton.Visibility = Visibility.Visible;
+        }
+
+        var layout = GraphLayoutEngine.ComputeLayout(nodesToLayout, _renderer.NodeWidth, _renderer.NodeHeight, MALSpiderConstants.VerticalSpacing, _showLN, _showManga, _showAnime);
         _renderer.DrawGraph(layout);
-        _renderer.UpdateHeaderPositions(MainScrollViewer.HorizontalOffset, MainScrollViewer.ViewportWidth);
+        _renderer.UpdateHeaderPositions(MainScrollViewer.HorizontalOffset, MainScrollViewer.ViewportWidth, GraphScale.ScaleX);
 
         if (layout.RootPos.X > 0 || layout.RootPos.Y > 0) ScrollToNode(layout.RootPos);
     }
 
     private void MainScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        _renderer.UpdateHeaderPositions(e.HorizontalOffset, e.ViewportWidth);
+        _renderer?.UpdateHeaderPositions(e.HorizontalOffset, e.ViewportWidth, GraphScale.ScaleX);
         if (TimeTransform != null) TimeTransform.Y = -e.VerticalOffset;
     }
 
@@ -373,15 +401,34 @@ public partial class MainWindow : Window
         MainScrollViewer.ScrollToVerticalOffset(pos.Y - MainScrollViewer.ViewportHeight / 2 + _renderer.NodeHeight / 2);
     }
 
+    private Point _mouseDownPosition;
+    private bool _isClickingNode;
+    private DependencyObject? _clickedNode;
+
     private void ScrollViewer_MouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.ChangedButton == MouseButton.Left && !IsMouseOverNode(e.GetPosition(GraphCanvas)))
+        // Ignore clicks on scroll bars
+        if (e.OriginalSource is DependencyObject dep &&
+            (VisualTreeHelper.GetParent(dep) is System.Windows.Controls.Primitives.ScrollBar ||
+             dep is System.Windows.Controls.Primitives.ScrollBar ||
+             FindParent<System.Windows.Controls.Primitives.ScrollBar>(dep) != null))
+        {
+            return;
+        }
+
+        if (e.ChangedButton == MouseButton.Left)
         {
             _lastMousePosition = e.GetPosition(MainScrollViewer);
+            _mouseDownPosition = _lastMousePosition;
             _isLmbPanning = true;
             MainScrollViewer.CaptureMouse();
             Cursor = Cursors.SizeAll;
             if (_isMmbPanning) _isMmbPanning = false;
+
+            // Check if we started clicking on a node
+            _clickedNode = GetNodeAtPosition(e.GetPosition(GraphCanvas));
+            _isClickingNode = _clickedNode != null;
+
             e.Handled = true;
         }
         else if (e.ChangedButton == MouseButton.Middle)
@@ -413,6 +460,19 @@ public partial class MainWindow : Window
         return false;
     }
 
+    private DependencyObject? GetNodeAtPosition(Point position)
+    {
+        HitTestResult result = VisualTreeHelper.HitTest(GraphCanvas, position);
+        if (result == null) return null;
+        DependencyObject obj = result.VisualHit;
+        while (obj != null && obj != GraphCanvas)
+        {
+            if (obj is Border b && b.Cursor == Cursors.Hand) return b;
+            obj = VisualTreeHelper.GetParent(obj);
+        }
+        return null;
+    }
+
     private void ScrollViewer_MouseMove(object sender, MouseEventArgs e)
     {
         if (_isLmbPanning)
@@ -441,6 +501,45 @@ public partial class MainWindow : Window
             _isLmbPanning = false;
             MainScrollViewer.ReleaseMouseCapture();
             Cursor = Cursors.Arrow;
+
+            // Check if this was a click on a node
+            if (_isClickingNode && _clickedNode is Border nodeBorder)
+            {
+                Point currentPos = e.GetPosition(MainScrollViewer);
+                double distance = Point.Subtract(currentPos, _mouseDownPosition).Length;
+
+                // Threshold for click vs drag (5 pixels is usually plenty)
+                if (distance < 5)
+                {
+                    if (nodeBorder.Tag is EntryNode node)
+                    {
+                        if (Keyboard.Modifiers == ModifierKeys.Control)
+                        {
+                            if (_currentRoot != null) _currentRoot.IsInputRoot = false;
+                            if (_subGraphRoot != null) _subGraphRoot.IsInputRoot = false; // Cleanup previous subgraph root if any
+
+                            _subGraphRoot = node;
+                            _subGraphRoot.IsInputRoot = true;
+                            _isSubGraphMode = true;
+                            RenderGraph(null);
+                        }
+                        else if (!string.IsNullOrEmpty(node.MalUrl))
+                        {
+                            try
+                            {
+                                Process.Start(new ProcessStartInfo(node.MalUrl) { UseShellExecute = true });
+                            }
+                            catch (Exception ex)
+                            {
+                                Debug.WriteLine($"Failed to open URL: {ex.Message}");
+                            }
+                        }
+                    }
+                }
+            }
+
+            _isClickingNode = false;
+            _clickedNode = null;
             e.Handled = true;
         }
     }
@@ -451,27 +550,27 @@ public partial class MainWindow : Window
         {
             double zoomDelta = e.Delta > 0 ? 0.1 : -0.1;
             double newZoom = Math.Clamp(ZoomSlider.Value + zoomDelta, MALSpiderConstants.MinZoom, MALSpiderConstants.MaxZoom);
-            
+
             if (Math.Abs(newZoom - ZoomSlider.Value) > 0.001)
             {
                 Point mousePos = e.GetPosition(GraphCanvas);
-                
+
                 // Get mouse position relative to ScrollViewer before zoom
                 Point mouseInViewport = e.GetPosition(MainScrollViewer);
-                
+
                 ZoomSlider.Value = newZoom;
-                
+
                 // Forces layout update so we can scroll to the correct position
                 GraphCanvas.UpdateLayout();
-                
+
                 // Adjust scroll to keep mouse position fixed
                 double newX = (mousePos.X * newZoom) - mouseInViewport.X;
                 double newY = (mousePos.Y * newZoom) - mouseInViewport.Y;
-                
+
                 MainScrollViewer.ScrollToHorizontalOffset(newX);
                 MainScrollViewer.ScrollToVerticalOffset(newY);
             }
-            
+
             e.Handled = true;
         }
     }
@@ -482,10 +581,38 @@ public partial class MainWindow : Window
         {
             GraphScale.ScaleX = e.NewValue;
             GraphScale.ScaleY = e.NewValue;
-            SaveSettings();
+
+            // Forces layout update so ScrollViewer properties are current
+            GraphCanvas.UpdateLayout();
+            MainScrollViewer.UpdateLayout();
+
+            _renderer?.UpdateHeaderPositions(MainScrollViewer.HorizontalOffset, MainScrollViewer.ViewportWidth, e.NewValue);
         }
+    }
+
+    private void ResetZoom_Click(object sender, RoutedEventArgs e)
+    {
+        ZoomSlider.Value = 1.0;
+    }
+
+    private void BackButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_subGraphRoot != null) _subGraphRoot.IsInputRoot = false;
+        if (_currentRoot != null) _currentRoot.IsInputRoot = true;
+
+        _isSubGraphMode = false;
+        _subGraphRoot = null;
+        RenderGraph(null);
     }
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+    private static T? FindParent<T>(DependencyObject child) where T : DependencyObject
+    {
+        DependencyObject parentObject = VisualTreeHelper.GetParent(child);
+        if (parentObject == null) return null;
+        if (parentObject is T parent) return parent;
+        return FindParent<T>(parentObject);
+    }
 }

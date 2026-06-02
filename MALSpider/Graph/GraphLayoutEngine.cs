@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using MALSpider.Models;
+using MALSpider;
 
 namespace MALSpider.Graph
 {
@@ -44,6 +45,32 @@ namespace MALSpider.Graph
                     lock (node.Relations)
                     {
                         foreach (var rel in node.Relations) stack.Push(rel.Target);
+                    }
+                }
+            }
+            return visited.ToList();
+        }
+
+        public static List<EntryNode> GetConnectedNodes(EntryNode root, int maxDepth = 1)
+        {
+            var visited = new HashSet<EntryNode>();
+            var queue = new Queue<(EntryNode Node, int Depth)>();
+            queue.Enqueue((root, 0));
+            visited.Add(root);
+
+            while (queue.Count > 0)
+            {
+                var (node, depth) = queue.Dequeue();
+                if (depth >= maxDepth) continue;
+
+                lock (node.Relations)
+                {
+                    foreach (var rel in node.Relations)
+                    {
+                        if (visited.Add(rel.Target))
+                        {
+                            queue.Enqueue((rel.Target, depth + 1));
+                        }
                     }
                 }
             }
@@ -102,9 +129,37 @@ namespace MALSpider.Graph
 
         public static List<EntryNode> OrderByDateAndRelation(List<EntryNode> cluster)
         {
-            return cluster.OrderBy(n => n.ReleaseDate ?? DateTime.MaxValue)
-                          .ThenBy(n => n.Title)
-                          .ToList();
+            var sequelAdj = GraphConnectivity.BuildSequelAdj(cluster);
+            var roots = cluster.Where(n => !cluster.Any(m => sequelAdj.ContainsKey(m) && sequelAdj[m].Contains(n))).ToList();
+            if (!roots.Any() && cluster.Any()) roots.Add(cluster[0]);
+
+            var ordered = new List<EntryNode>();
+            var visited = new HashSet<EntryNode>();
+            var queue = new Queue<EntryNode>(roots.OrderBy(r => r.ReleaseDate ?? DateTime.MaxValue));
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                if (visited.Add(current))
+                {
+                    ordered.Add(current);
+                    if (sequelAdj.TryGetValue(current, out var neighbors))
+                    {
+                        foreach (var neighbor in neighbors.OrderBy(n => n.ReleaseDate ?? DateTime.MaxValue))
+                        {
+                            if (!visited.Contains(neighbor)) queue.Enqueue(neighbor);
+                        }
+                    }
+                }
+            }
+
+            // Catch any disconnected nodes
+            foreach (var node in cluster.OrderBy(n => n.ReleaseDate ?? DateTime.MaxValue))
+            {
+                if (visited.Add(node)) ordered.Add(node);
+            }
+
+            return ordered;
         }
 
         public static NodeLayout ComputeLayout(List<EntryNode> allNodes, double nodeWidth, double nodeHeight, double verticalSpacing, bool showLN, bool showManga, bool showAnime)
@@ -136,7 +191,7 @@ namespace MALSpider.Graph
 
             layout.Compressor = new TimeCompressor(layout.MinDate, layout.MaxDate, allDates);
 
-            double currentX = 20;
+            double currentX = 0;
             double maxBottom = 0;
 
             double GetY(DateTime? date) => layout.Compressor.GetY(date, 100, verticalSpacing);
@@ -164,16 +219,95 @@ namespace MALSpider.Graph
                         foreach (var clusterNodes in nodesByClusterInThisLane)
                         {
                             var orderedCluster = OrderByDateAndRelation(clusterNodes);
+                            var sequelAdjInLane = GraphConnectivity.BuildSequelAdj(clusterNodes);
+
                             bool clusterPlaced = false;
                             int laneShift = 0;
 
                             while (!clusterPlaced)
                             {
-                                double testX = columnStartX + laneShift * (nodeWidth + MALSpiderConstants.ClusterHorizontalSpacing);
+                                double clusterBaseX = columnStartX + laneShift * (nodeWidth + MALSpiderConstants.ClusterHorizontalSpacing);
+                                var testPositions = new Dictionary<EntryNode, Point>();
+                                var nodeOffsets = new Dictionary<EntryNode, int>();
+
+                                // Determine horizontal offsets within the cluster
+                                var processedInCluster = new HashSet<EntryNode>();
+                                foreach (var node in orderedCluster)
+                                {
+                                    int offset = 0;
+                                    // Only sequels should be straight down vertically (offset 0 relative to parent)
+                                    // Side stories and alternatives should be shifted horizontally.
+
+                                    // Find all potential parents in the same cluster that have already been processed
+                                    var parents = processedInCluster.Where(p => p.Relations.Any(r => r.Target == node)).ToList();
+
+                                    if (parents.Any())
+                                    {
+                                        // Priority 1: If there's a Sequel relation, maintain its offset
+                                        var sequelParent = parents.FirstOrDefault(p => p.Relations.Any(r => r.Target == node && r.RelationType == "Sequel"));
+                                        if (sequelParent != null)
+                                        {
+                                            offset = nodeOffsets[sequelParent];
+                                        }
+                                        else
+                                        {
+                                            // Priority 2: Check for Prequel (node is a Sequel to someone else's Prequel)
+                                            // OR: someone else is a Sequel to this node (which means we should be in their vertical line)
+                                            var prequelChild = clusterNodes.FirstOrDefault(p => node.Relations.Any(r => r.Target == p && r.RelationType == "Prequel") && nodeOffsets.ContainsKey(p));
+                                            var sequelChild = clusterNodes.FirstOrDefault(p => p.Relations.Any(r => r.Target == node && r.RelationType == "Prequel") && nodeOffsets.ContainsKey(p));
+
+                                            if (prequelChild != null)
+                                            {
+                                                offset = nodeOffsets[prequelChild];
+                                            }
+                                            else if (sequelChild != null)
+                                            {
+                                                offset = nodeOffsets[sequelChild];
+                                            }
+                                            else
+                                            {
+                                                // Priority 3: Branch off from the most relevant parent (highest offset)
+                                                var bestParent = parents.OrderByDescending(p => nodeOffsets[p]).First();
+                                                bool isHorizontal = bestParent.Relations.Any(r => r.Target == node && MALSpiderConstants.HorizontalRelationTypes.Contains(r.RelationType));
+
+                                                // If it's not a sequel, and not explicitly a horizontal type, we still branch if the user said "only sequels should be straight down"
+                                                if (!isHorizontal)
+                                                {
+                                                    // Check if it's explicitly a vertical type. If not, default to branching.
+                                                    bool isVertical = bestParent.Relations.Any(r => r.Target == node && r.RelationType == "Sequel");
+                                                    if (!isVertical) isHorizontal = true;
+                                                }
+
+                                                offset = isHorizontal ? nodeOffsets[bestParent] + 1 : nodeOffsets[bestParent];
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // If no direct parent was found in processedInCluster, check if it's a Prequel/Sequel to something already processed
+                                        var prequelChild = clusterNodes.FirstOrDefault(p => node.Relations.Any(r => r.Target == p && r.RelationType == "Prequel") && nodeOffsets.ContainsKey(p));
+                                        var sequelChild = clusterNodes.FirstOrDefault(p => p.Relations.Any(r => r.Target == node && r.RelationType == "Prequel") && nodeOffsets.ContainsKey(p));
+
+                                        if (prequelChild != null)
+                                        {
+                                            offset = nodeOffsets[prequelChild];
+                                        }
+                                        else if (sequelChild != null)
+                                        {
+                                            offset = nodeOffsets[sequelChild];
+                                        }
+                                    }
+
+                                    nodeOffsets[node] = offset;
+                                    processedInCluster.Add(node);
+                                }
+
                                 bool collision = false;
                                 foreach (var node in orderedCluster)
                                 {
                                     double y = GetY(node.ReleaseDate);
+                                    double testX = clusterBaseX + nodeOffsets[node] * (nodeWidth + MALSpiderConstants.ClusterHorizontalSpacing);
+
                                     double top = y - MALSpiderConstants.CollisionPadding;
                                     double bottom = y + nodeHeight + MALSpiderConstants.CollisionPadding;
 
@@ -182,16 +316,17 @@ namespace MALSpider.Graph
                                         collision = true;
                                         break;
                                     }
+                                    testPositions[node] = new Point(testX, y);
                                 }
 
                                 if (!collision)
                                 {
                                     foreach (var node in orderedCluster)
                                     {
-                                        double y = GetY(node.ReleaseDate);
-                                        layout.NodePositions[node] = new Point(testX, y);
-                                        occupiedY.Add((y, y + nodeHeight, testX));
-                                        maxBottom = Math.Max(maxBottom, y + nodeHeight);
+                                        var pos = testPositions[node];
+                                        layout.NodePositions[node] = pos;
+                                        occupiedY.Add((pos.Y, pos.Y + nodeHeight, pos.X));
+                                        maxBottom = Math.Max(maxBottom, pos.Y + nodeHeight);
                                         if (node.IsInputRoot) layout.RootPos = layout.NodePositions[node];
                                     }
                                     clusterPlaced = true;
@@ -203,24 +338,28 @@ namespace MALSpider.Graph
                             }
                         }
 
-                        double columnMaxX = occupiedY.Max(o => o.X);
+                        double columnMaxX = occupiedY.Any() ? occupiedY.Max(o => o.X) : columnStartX;
                         double columnWidth = (columnMaxX + nodeWidth) - columnStartX;
                         double headerX = columnStartX + (columnWidth - nodeWidth) / 2;
-                        layout.LaneHeaders.Add((group.Title, headerX, group.IsVisible, columnStartX - MALSpiderConstants.HorizontalGap / 2, columnMaxX + nodeWidth + MALSpiderConstants.HorizontalGap / 2));
+
+                        double laneLeft = columnStartX;
+                        double laneRight = columnMaxX + nodeWidth;
+
+                        layout.LaneHeaders.Add((group.Title, headerX, group.IsVisible, laneLeft, laneRight));
 
                         currentX = columnMaxX + nodeWidth + MALSpiderConstants.HorizontalGap;
                         layout.SeparatorXPositions.Add(currentX - MALSpiderConstants.HorizontalGap / 2);
                     }
                     else
                     {
-                        layout.LaneHeaders.Add((group.Title, currentX, group.IsVisible, currentX - MALSpiderConstants.HorizontalGap / 2, currentX + nodeWidth + MALSpiderConstants.HorizontalGap / 2));
+                        layout.LaneHeaders.Add((group.Title, currentX, group.IsVisible, currentX, currentX + nodeWidth));
                         currentX += nodeWidth + MALSpiderConstants.HorizontalGap;
                         layout.SeparatorXPositions.Add(currentX - MALSpiderConstants.HorizontalGap / 2);
                     }
                 }
                 else
                 {
-                    layout.LaneHeaders.Add((group.Title, currentX, group.IsVisible, currentX - MALSpiderConstants.HorizontalGap / 2, currentX + nodeWidth + MALSpiderConstants.HorizontalGap / 2));
+                    layout.LaneHeaders.Add((group.Title, currentX, group.IsVisible, currentX, currentX + nodeWidth));
                     currentX += nodeWidth + MALSpiderConstants.HorizontalGap;
                     layout.SeparatorXPositions.Add(currentX - MALSpiderConstants.HorizontalGap / 2);
                 }
