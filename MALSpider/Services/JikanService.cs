@@ -60,7 +60,7 @@ namespace MALSpider.Services
             return null;
         }
 
-        public async Task<EntryNode> GetFullHierarchy(string searchOrUrl, Action<string> onStatusUpdate = null)
+        public async Task<EntryNode> GetFullHierarchy(string searchOrUrl, Action<string> onStatusUpdate = null, Action<EntryNode> onNodeFetched = null)
         {
             int malId;
             string type;
@@ -85,13 +85,13 @@ namespace MALSpider.Services
 
             var visited = new Dictionary<string, EntryNode>();
             var totalDiscovered = 1;
-        
-            var root = await TraverseRecursive(malId, type, visited, s => onStatusUpdate?.Invoke($"{visited.Count}/{totalDiscovered}: {s}"), () => Interlocked.Increment(ref totalDiscovered));
+    
+            var root = await TraverseRecursive(malId, type, visited, s => onStatusUpdate?.Invoke($"{visited.Count}/{totalDiscovered}: {s}"), () => Interlocked.Increment(ref totalDiscovered), onNodeFetched);
             if (root != null) root.IsInputRoot = true;
             return root;
         }
 
-        private async Task<EntryNode> TraverseRecursive(int malId, string type, Dictionary<string, EntryNode> visited, Action<string> onStatusUpdate, Action onNewDiscovered = null)
+        private async Task<EntryNode> TraverseRecursive(int malId, string type, Dictionary<string, EntryNode> visited, Action<string> onStatusUpdate, Action onNewDiscovered = null, Action<EntryNode> onNodeFetched = null)
         {
             string key = $"{type}_{malId}";
             lock (visited)
@@ -138,6 +138,9 @@ namespace MALSpider.Services
                     }
                 }
 
+                // Notify that this node's details are now available
+                onNodeFetched?.Invoke(node);
+
                 if (relations != null)
                 {
                     var tasks = new List<Task>();
@@ -146,21 +149,63 @@ namespace MALSpider.Services
                         foreach (var entry in rel.Entry)
                         {
                             onNewDiscovered?.Invoke();
-                            var task = TraverseRecursive(entry.MalId, entry.Type.ToLower(), visited, onStatusUpdate, onNewDiscovered).ContinueWith(t =>
+                            string relType = rel.RelationType;
+                            int targetMalId = entry.MalId;
+                            string targetType = entry.Type.ToLower();
+
+                            var task = TraverseRecursive(targetMalId, targetType, visited, onStatusUpdate, onNewDiscovered, onNodeFetched).ContinueWith(t =>
                             {
                                 if (t.Result != null)
                                 {
                                     lock (node.Relations)
                                     {
+                                        if (node.Relations.Any(r => r.Target == t.Result)) return;
+
+                                        string relationType = relType;
+                                        // Requirement: "when choosing between 'parent story' and 'side story' for bidirectional links, always choose 'side story' -- this is a downward relationship"
+                                        lock (t.Result.Relations)
+                                        {
+                                            var backRel = t.Result.Relations.FirstOrDefault(r => r.Target == node);
+                                            if (backRel != null)
+                                            {
+                                                if ((relationType == "Parent story" && backRel.RelationType == "Side story") ||
+                                                    (relationType == "Side story" && backRel.RelationType == "Parent story"))
+                                                {
+                                                    relationType = "Side story";
+                                                    backRel.RelationType = "Side story";
+                                                }
+                                            }
+                                        }
+
                                         node.Relations.Add(new EntryRelation
                                         {
-                                            RelationType = rel.RelationType,
+                                            RelationType = relationType,
                                             Target = t.Result
                                         });
                                     }
                                 }
                             });
                             tasks.Add(task);
+
+                            // For progressive rendering: add the node to relations as soon as it's available in 'visited'
+                            // so that the graph can start drawing connections to "skeleton" nodes.
+                            lock (visited)
+                            {
+                                if (visited.TryGetValue($"{targetType}_{targetMalId}", out var targetNode))
+                                {
+                                    lock (node.Relations)
+                                    {
+                                        if (!node.Relations.Any(r => r.Target == targetNode))
+                                        {
+                                            node.Relations.Add(new EntryRelation
+                                            {
+                                                RelationType = relType,
+                                                Target = targetNode
+                                            });
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     await Task.WhenAll(tasks);
@@ -182,6 +227,7 @@ namespace MALSpider.Services
             node.TitleJapanese = details.TitleJapanese;
             node.ImageUrl = details.Images?.Jpg?.LargeImageUrl ?? details.Images?.Jpg?.ImageUrl;
             node.MalUrl = details.Url;
+            node.Synopsis = details.Synopsis;
             node.ReleaseDate = details.Aired?.From;
         }
 
@@ -193,6 +239,7 @@ namespace MALSpider.Services
             node.TitleJapanese = details.TitleJapanese;
             node.ImageUrl = details.Images?.Jpg?.LargeImageUrl ?? details.Images?.Jpg?.ImageUrl;
             node.MalUrl = details.Url;
+            node.Synopsis = details.Synopsis;
             node.ReleaseDate = details.Published?.From;
         }
 

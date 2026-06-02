@@ -35,6 +35,9 @@ namespace MALSpider.Models
 
         [JsonPropertyName("aired")]
         public Aired Aired { get; set; }
+
+        [JsonPropertyName("synopsis")]
+        public string Synopsis { get; set; }
     }
 
     public class Manga
@@ -62,6 +65,9 @@ namespace MALSpider.Models
 
         [JsonPropertyName("published")]
         public Published Published { get; set; }
+
+        [JsonPropertyName("synopsis")]
+        public string Synopsis { get; set; }
     }
 
     public class Aired
@@ -140,6 +146,7 @@ namespace MALSpider.Models
         public string TitleJapanese { get; set; }
         public string ImageUrl { get; set; }
         public string MalUrl { get; set; }
+        public string Synopsis { get; set; }
         public DateTime? ReleaseDate { get; set; }
         public bool IsInputRoot { get; set; }
         public List<EntryRelation> Relations { get; set; } = new List<EntryRelation>();
