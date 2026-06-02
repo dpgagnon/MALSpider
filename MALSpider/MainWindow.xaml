@@ -269,6 +269,48 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <Style x:Key="ModernToggleSwitch" TargetType="CheckBox">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal">
+                            <Grid x:Name="ToggleRoot" Width="40" Height="20" Margin="0,0,8,0">
+                                <Border x:Name="BackgroundBorder" Background="#333333" CornerRadius="10" BorderThickness="0"/>
+                                <Border x:Name="Thumb" Background="White" Width="14" Height="14" CornerRadius="7" HorizontalAlignment="Left" Margin="3">
+                                    <Border.RenderTransform>
+                                        <TranslateTransform x:Name="ThumbTransform" X="0"/>
+                                    </Border.RenderTransform>
+                                </Border>
+                            </Grid>
+                            <ContentPresenter VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="BackgroundBorder" Property="Background" Value="#BB86FC"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="ThumbTransform" Storyboard.TargetProperty="X" To="20" Duration="0:0:0.15"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="ThumbTransform" Storyboard.TargetProperty="X" To="0" Duration="0:0:0.15"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Window.Icon>
@@ -302,10 +344,16 @@
                     </Grid.ColumnDefinitions>
                     <TextBlock Text="Search or URL:" VerticalAlignment="Center" Margin="0,0,10,0" Foreground="#B0B0B0" FontSize="14"/>
                     <ComboBox x:Name="SearchBox" Grid.Column="1" Style="{StaticResource ModernComboBox}" IsEditable="True" KeyDown="SearchBox_KeyDown" HorizontalAlignment="Stretch"/>
-                    <Button Grid.Column="2" Click="Spider_Click" Style="{StaticResource ModernButton}" Margin="15,0,0,0" Padding="25,8">
+                    <Button x:Name="SpiderButton" Grid.Column="2" Click="Spider_Click" Style="{StaticResource ModernButton}" Margin="15,0,0,0" Padding="25,8">
                         <StackPanel Orientation="Horizontal">
                             <Image Source="{StaticResource SpiderIcon}" Width="16" Height="16" Margin="0,0,8,0"/>
                             <TextBlock Text="SPIDER" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="StopButton" Grid.Column="2" Click="StopButton_Click" Style="{StaticResource ModernButton}" Margin="15,0,0,0" Padding="25,8" Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal">
+                            <Rectangle Fill="White" Width="12" Height="12" Margin="0,0,8,0"/>
+                            <TextBlock Text="STOP" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Button>
                     <Button Grid.Column="3" Click="RefreshButton_Click" Style="{StaticResource ModernButton}" Margin="10,0,0,0" Padding="12,8" ToolTip="Clear cache and re-crawl">
@@ -319,11 +367,31 @@
 
         <Grid Grid.Row="1">
             <ScrollViewer x:Name="MainScrollViewer" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
-                          MouseDown="ScrollViewer_MouseDown" MouseMove="ScrollViewer_MouseMove" MouseUp="ScrollViewer_MouseUp"
+                          PreviewMouseDown="ScrollViewer_MouseDown" PreviewMouseMove="ScrollViewer_MouseMove" PreviewMouseUp="ScrollViewer_MouseUp"
+                          PreviewMouseWheel="ScrollViewer_PreviewMouseWheel"
                           ScrollChanged="MainScrollViewer_ScrollChanged">
-                <Canvas x:Name="GraphCanvas" Background="#121212" MouseDown="GraphCanvas_MouseDown"/>
+                <Canvas x:Name="GraphCanvas" Background="#121212" RenderTransformOrigin="0,0">
+                    <Canvas.LayoutTransform>
+                        <ScaleTransform x:Name="GraphScale" ScaleX="1.0" ScaleY="1.0"/>
+                    </Canvas.LayoutTransform>
+                </Canvas>
             </ScrollViewer>
-            <Canvas x:Name="HeaderCanvas" Height="80" VerticalAlignment="Top" IsHitTestVisible="False" Background="#E6121212">
+
+            <!-- Semi-transparent header background that doesn't block panning -->
+            <Border Height="80" VerticalAlignment="Top" Background="#E6121212" IsHitTestVisible="False">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Margin" Value="0,0,12,0"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding ComputedVerticalScrollBarVisibility, ElementName=MainScrollViewer}" Value="Collapsed">
+                                <Setter Property="Margin" Value="0"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+            </Border>
+
+            <Canvas x:Name="HeaderCanvas" Height="80" VerticalAlignment="Top" IsHitTestVisible="True" Background="{x:Null}">
                 <Canvas.Style>
                     <Style TargetType="Canvas">
                         <Setter Property="Margin" Value="0,0,12,0"/>
@@ -334,9 +402,6 @@
                         </Style.Triggers>
                     </Style>
                 </Canvas.Style>
-                <Canvas.RenderTransform>
-                    <TranslateTransform x:Name="HeaderTransform"/>
-                </Canvas.RenderTransform>
             </Canvas>
             <Canvas x:Name="LoadingCanvas" Visibility="Collapsed" IsHitTestVisible="False" Background="#121212" ClipToBounds="True"/>
             <Grid HorizontalAlignment="Right" Width="55" IsHitTestVisible="False" ClipToBounds="True" Background="#B3121212">
@@ -386,6 +451,7 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                     </Grid>
                 </ItemsPanelTemplate>
@@ -394,6 +460,19 @@
                 <TextBlock x:Name="StatusLabel" Foreground="#BB86FC" TextTrimming="CharacterEllipsis" FontSize="13"/>
             </StatusBarItem>
             <StatusBarItem Grid.Column="1">
+                <StackPanel Orientation="Horizontal" Margin="0,0,10,0">
+                    <TextBlock Text="Zoom:" VerticalAlignment="Center" Foreground="#B0B0B0" FontSize="12" Margin="0,0,5,0"/>
+                    <Slider x:Name="ZoomSlider" Width="100" VerticalAlignment="Center"
+                            Minimum="{x:Static local:MALSpiderConstants.MinZoom}"
+                            Maximum="{x:Static local:MALSpiderConstants.MaxZoom}"
+                            Value="1.0"
+                            SmallChange="0.1" LargeChange="0.2"
+                            ValueChanged="ZoomSlider_ValueChanged"/>
+                    <TextBlock Text="{Binding Value, ElementName=ZoomSlider, StringFormat={}{0:P0}}"
+                               Width="40" VerticalAlignment="Center" Foreground="#B0B0B0" FontSize="12" Margin="5,0,0,0"/>
+                </StackPanel>
+            </StatusBarItem>
+            <StatusBarItem Grid.Column="2">
                 <ProgressBar x:Name="WorkProgressBar" Width="200" Height="16" Visibility="Collapsed" Minimum="0" Maximum="100"/>
             </StatusBarItem>
         </StatusBar>

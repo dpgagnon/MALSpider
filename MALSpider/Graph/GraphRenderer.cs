@@ -14,6 +14,9 @@ namespace MALSpider.Graph
 {
     public class GraphRenderer
     {
+        public Action<EntryNode>? OnNodeRetryRequested { get; set; }
+        public Action<string, bool>? OnLaneToggleRequested { get; set; }
+
         private readonly Canvas _graphCanvas;
         private readonly Canvas _headerCanvas;
         private readonly Canvas _timeCanvas;
@@ -24,6 +27,7 @@ namespace MALSpider.Graph
         private readonly Dictionary<EntryNode, Border> _nodeToBorder = new();
         private readonly Dictionary<EntryNode, List<Shape>> _nodeToConnections = new();
         private readonly Dictionary<Shape, (EntryNode Source, EntryNode Target, bool IsDownward)> _connectionInfo = new();
+        private readonly List<(FrameworkElement Element, FrameworkElement Underline, double PreferredX, double LaneLeft, double LaneRight)> _headerInfos = new();
 
         public GraphRenderer(Canvas graphCanvas, Canvas headerCanvas, Canvas timeCanvas)
         {
@@ -37,12 +41,12 @@ namespace MALSpider.Graph
             Clear();
 
             // 1. Draw Axis
-            DrawTimeAxis(layout.MinDate, layout.MaxDate, date => layout.Compressor.GetY(date, 100, MALSpiderConstants.VerticalSpacing));
+            DrawTimeAxis(layout.MinDate, layout.MaxDate, layout.VisibleDates, date => layout.Compressor.GetY(date, 100, MALSpiderConstants.VerticalSpacing));
 
             // 2. Draw Headers
             foreach (var header in layout.LaneHeaders)
             {
-                DrawHeader(header.Title, header.X);
+                DrawHeader(header.Title, header.X, header.IsVisible, header.LaneLeft, header.LaneRight);
             }
 
             // 3. Draw Nodes
@@ -114,6 +118,7 @@ namespace MALSpider.Graph
             _nodeToBorder.Clear();
             _nodeToConnections.Clear();
             _connectionInfo.Clear();
+            _headerInfos.Clear();
         }
 
         public void UpdateCanvasSize(double width, double height)
@@ -127,59 +132,176 @@ namespace MALSpider.Graph
             return _nodeToBorder.TryGetValue(node, out var border) ? border : null;
         }
 
-        public void DrawHeader(string text, double x)
+        public void DrawHeader(string text, double x, bool isChecked, double laneLeft, double laneRight)
         {
+            var panel = new StackPanel
+            {
+                Width = MALSpiderConstants.NodeWidth,
+                Orientation = Orientation.Vertical,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+
             var textBlock = new TextBlock
             {
                 Text = text,
                 FontSize = MALSpiderConstants.HeaderFontSize,
                 FontWeight = FontWeights.Bold,
                 Foreground = Brushes.White,
-                Width = NodeWidth,
-                TextAlignment = TextAlignment.Center
+                TextAlignment = TextAlignment.Center,
+                Margin = new Thickness(0, 5, 0, 0)
             };
-            Canvas.SetLeft(textBlock, x);
-            Canvas.SetTop(textBlock, 20);
-            _headerCanvas.Children.Add(textBlock);
+            panel.Children.Add(textBlock);
+
+            var toggle = new CheckBox
+            {
+                Style = (Style)Application.Current.MainWindow.FindResource("ModernToggleSwitch"),
+                IsChecked = isChecked,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 5, 0, 0),
+                Content = "Visible"
+            };
+            toggle.Checked += (s, e) => OnLaneToggleRequested?.Invoke(text, true);
+            toggle.Unchecked += (s, e) => OnLaneToggleRequested?.Invoke(text, false);
+            panel.Children.Add(toggle);
+
+            Canvas.SetLeft(panel, x);
+            Canvas.SetTop(panel, 5);
+            _headerCanvas.Children.Add(panel);
 
             var line = new Line
             {
-                X1 = x,
-                Y1 = 60,
-                X2 = x + NodeWidth,
-                Y2 = 60,
+                X1 = 0,
+                Y1 = 75,
+                X2 = MALSpiderConstants.NodeWidth,
+                Y2 = 75,
                 Stroke = new SolidColorBrush(MALSpiderConstants.PrimaryAccentColor),
                 StrokeThickness = 2
             };
+            Canvas.SetLeft(line, x);
             _headerCanvas.Children.Add(line);
+
+            _headerInfos.Add((panel, line, x, laneLeft, laneRight));
         }
 
-        public void DrawTimeAxis(DateTime minDate, DateTime maxDate, Func<DateTime?, double> getYForDate)
+        public void UpdateHeaderPositions(double horizontalOffset, double viewportWidth)
         {
-            for (int year = minDate.Year; year <= maxDate.Year; year++)
+            foreach (var info in _headerInfos)
+            {
+                double headerWidth = MALSpiderConstants.NodeWidth;
+
+                // Absolute preferred position
+                double prefX = info.PreferredX;
+
+                // Boundaries in absolute coordinates
+                double L = info.LaneLeft;
+                double R = info.LaneRight;
+
+                // Relative positions in viewport
+                double xInViewport = prefX - horizontalOffset;
+                double minX = L - horizontalOffset;
+                double maxX = R - headerWidth - horizontalOffset;
+
+                // Stickiness logic:
+                // Stay within viewport [0, viewportWidth - headerWidth]
+                // but never go outside lane boundaries [minX, maxX]
+
+                double targetX = xInViewport;
+
+                // If lane content is smaller than viewport, keep header at prefX relative to graph (centered over lane)
+                // If lane content is larger than viewport, then apply stickiness logic
+
+                bool laneWiderThanViewport = (R - L) > viewportWidth;
+
+                // Apply stickiness to viewport edges ONLY if it doesn't move it outside its lane
+                if (targetX < 0) targetX = 0;
+                if (targetX > viewportWidth - headerWidth) targetX = viewportWidth - headerWidth;
+
+                // Respect lane boundaries
+                // Clamp targetX to [minX, maxX]
+                if (targetX < minX) targetX = minX;
+                if (targetX > maxX) targetX = maxX;
+
+                Canvas.SetLeft(info.Element, targetX);
+                Canvas.SetLeft(info.Underline, targetX);
+            }
+        }
+
+        public void DrawTimeAxis(DateTime minDate, DateTime maxDate, List<DateTime> visibleDates, Func<DateTime?, double> getYForDate)
+        {
+            int startYear = minDate.Year;
+            int endYear = maxDate.Year;
+
+            var yearsWithNodes = new HashSet<int>(visibleDates.Select(d => d.Year));
+
+            List<(int Year, double Y, bool HasNodes)> yearPlacements = new();
+            for (int year = startYear; year <= endYear; year++)
             {
                 var yearDate = new DateTime(year, 1, 1);
                 if (yearDate < minDate) yearDate = minDate;
-                double y = getYForDate(yearDate);
+                if (yearDate > maxDate) yearDate = maxDate;
+                yearPlacements.Add((year, getYForDate(yearDate), yearsWithNodes.Contains(year)));
+            }
+
+            for (int i = 0; i < yearPlacements.Count; i++)
+            {
+                var current = yearPlacements[i];
+
+                // Ellipsis logic:
+                // Skip if this year has no nodes AND it's not the first/last year
+                // AND it's part of a gap of at least 2 consecutive years without nodes
+                if (i > 0 && i < yearPlacements.Count - 1 && !current.HasNodes && yearPlacements[i - 1].HasNodes)
+                {
+                    // Find how long this gap is
+                    int gapEnd = i;
+                    while (gapEnd < yearPlacements.Count - 1 && !yearPlacements[gapEnd].HasNodes)
+                    {
+                        gapEnd++;
+                    }
+
+                    int gapLength = gapEnd - i;
+                    if (gapLength >= 2)
+                    {
+                        double midY = (yearPlacements[i].Y + yearPlacements[gapEnd - 1].Y) / 2;
+                        var ellipsis = new TextBlock
+                        {
+                            Text = "...",
+                            Foreground = Brushes.Gray,
+                            FontSize = MALSpiderConstants.TimeAxisYearFontSize,
+                            FontWeight = FontWeights.Bold
+                        };
+                        Canvas.SetTop(ellipsis, midY - 15);
+                        Canvas.SetRight(ellipsis, 10);
+                        _timeCanvas.Children.Add(ellipsis);
+
+                        i = gapEnd - 1; // Skip the gap
+                        continue;
+                    }
+                }
 
                 var yearLabel = new TextBlock
                 {
-                    Text = year.ToString(),
+                    Text = current.Year.ToString(),
                     Foreground = Brushes.Gray,
                     FontSize = MALSpiderConstants.TimeAxisYearFontSize,
                     FontWeight = FontWeights.Bold
                 };
-                Canvas.SetTop(yearLabel, y - 10);
+                Canvas.SetTop(yearLabel, current.Y - 10);
                 Canvas.SetRight(yearLabel, 5);
                 _timeCanvas.Children.Add(yearLabel);
 
+                // Only draw months if we have space and it's a short range
                 if ((maxDate - minDate).TotalDays < 365 * 10)
                 {
                     for (int month = 4; month <= 10; month += 3)
                     {
-                        var monthDate = new DateTime(year, month, 1);
+                        var monthDate = new DateTime(current.Year, month, 1);
                         if (monthDate > maxDate || monthDate < minDate) continue;
                         double my = getYForDate(monthDate);
+
+                        // Don't draw month if too close to year labels
+                        if (Math.Abs(my - current.Y) < 15) continue;
+                        if (i < yearPlacements.Count - 1 && Math.Abs(yearPlacements[i+1].Y - my) < 15) continue;
+
                         var monthLabel = new TextBlock
                         {
                             Text = monthDate.ToString("MMM"),
@@ -327,6 +449,32 @@ namespace MALSpider.Graph
                     TextWrapping = TextWrapping.Wrap,
                     Margin = new Thickness(0, 5, 0, 0)
                 });
+
+                if (!node.IsRetrying)
+                {
+                    var retryBtn = new Button
+                    {
+                        Content = "Retry",
+                        Padding = new Thickness(10, 2, 10, 2),
+                        Margin = new Thickness(0, 5, 0, 0),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        Style = (Style)Application.Current.MainWindow.FindResource("ModernButton"),
+                        FontSize = 10
+                    };
+                    retryBtn.Click += (s, e) => OnNodeRetryRequested?.Invoke(node);
+                    stack.Children.Add(retryBtn);
+                }
+                else
+                {
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = "Retrying...",
+                        FontSize = 10,
+                        Foreground = Brushes.Gray,
+                        TextAlignment = TextAlignment.Center,
+                        Margin = new Thickness(0, 5, 0, 0)
+                    });
+                }
             }
 
             if (node.ReleaseDate.HasValue)

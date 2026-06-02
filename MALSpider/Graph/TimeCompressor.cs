@@ -48,25 +48,27 @@ namespace MALSpider.Graph
             CompressionFactor = totalUncompressedDays / _totalCompressedDuration;
         }
 
-        public double GetY(DateTime? date, double startY, double maxHeight)
+        public double GetY(DateTime? date, double startY, double pixelsPerYear)
         {
-            if (!date.HasValue) return startY + maxHeight + MALSpiderConstants.NodeHeight;
+            double scale = pixelsPerYear / 365.25;
+            if (!date.HasValue) return startY + (_totalCompressedDuration * scale) + MALSpiderConstants.NodeHeight;
 
             DateTime d = date.Value;
             if (d <= _minDate) return startY;
-            if (d >= _maxDate) return startY + maxHeight;
+            if (d >= _maxDate) return startY + (_totalCompressedDuration * scale);
 
             // Find the interval [d1, d2] that contains d
             int index = _sortedDates.BinarySearch(d);
+            double compressedOffset;
             if (index >= 0)
             {
-                return startY + (_compressedOffsets[_sortedDates[index]] / _totalCompressedDuration) * maxHeight;
+                compressedOffset = _compressedOffsets[_sortedDates[index]];
             }
             else
             {
                 index = ~index;
                 if (index == 0) return startY;
-                if (index >= _sortedDates.Count) return startY + maxHeight;
+                if (index >= _sortedDates.Count) return startY + (_totalCompressedDuration * scale);
 
                 DateTime d1 = _sortedDates[index - 1];
                 DateTime d2 = _sortedDates[index];
@@ -75,10 +77,10 @@ namespace MALSpider.Graph
                 double offset2 = _compressedOffsets[d2];
 
                 double ratioInInterval = (d.Ticks - d1.Ticks) / (double)(d2.Ticks - d1.Ticks);
-                double compressedOffset = offset1 + ratioInInterval * (offset2 - offset1);
-
-                return startY + (compressedOffset / _totalCompressedDuration) * maxHeight;
+                compressedOffset = offset1 + ratioInInterval * (offset2 - offset1);
             }
+
+            return startY + (compressedOffset * scale);
         }
     }
 }

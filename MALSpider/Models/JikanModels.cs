@@ -152,6 +152,7 @@ namespace MALSpider.Models
         public DateTime? ReleaseDate { get; set; }
         public bool IsInputRoot { get; set; }
         public string? ErrorMessage { get; set; }
+        public bool IsRetrying { get; set; }
         public int Lane { get; set; }
         public List<EntryRelation> Relations { get; set; } = new List<EntryRelation>();
     }

@@ -16,13 +16,14 @@ namespace MALSpider.Graph
     public class NodeLayout
     {
         public Dictionary<EntryNode, Point> NodePositions { get; } = new();
-        public List<(string Title, double X)> LaneHeaders { get; } = new();
+        public List<(string Title, double X, bool IsVisible, double LaneLeft, double LaneRight)> LaneHeaders { get; } = new();
         public List<double> SeparatorXPositions { get; } = new();
         public List<VisualRelation> VisualRelations { get; } = new();
         public double MaxBottom { get; set; }
         public double MaxRight { get; set; }
         public DateTime MinDate { get; set; }
         public DateTime MaxDate { get; set; }
+        public List<DateTime> VisibleDates { get; set; } = new();
         public TimeCompressor Compressor { get; set; } = null!;
         public List<EntryNode> AllNodes { get; set; } = new();
         public Point RootPos { get; set; }
@@ -106,7 +107,7 @@ namespace MALSpider.Graph
                           .ToList();
         }
 
-        public static NodeLayout ComputeLayout(List<EntryNode> allNodes, double nodeWidth, double nodeHeight, double verticalSpacing)
+        public static NodeLayout ComputeLayout(List<EntryNode> allNodes, double nodeWidth, double nodeHeight, double verticalSpacing, bool showLN, bool showManga, bool showAnime)
         {
             var layout = new NodeLayout { AllNodes = allNodes };
             foreach (var n in allNodes)
@@ -120,11 +121,15 @@ namespace MALSpider.Graph
             var predAdj = GraphConnectivity.BuildPredecessorAdj(sequelAdj);
 
             var clusters = ClusterNodes(allNodes);
-            var lnClusters = clusters.Where(c => c.Any(n => n.Lane == 0)).ToList();
-            var mangaClusters = clusters.Where(c => c.Any(n => n.Lane == 1)).ToList();
-            var animeClusters = clusters.Where(c => c.Any(n => n.Lane == 2)).ToList();
 
-            var allDates = allNodes.Select(n => n.ReleaseDate).Where(d => d.HasValue).Cast<DateTime>().ToList();
+            // Filter nodes based on their lane and the user's selected visibility
+            var visibleNodes = allNodes.Where(n =>
+                (n.Lane == 0 && showLN) ||
+                (n.Lane == 1 && showManga) ||
+                (n.Lane == 2 && showAnime)).ToHashSet();
+
+            var allDates = visibleNodes.Select(n => n.ReleaseDate).Where(d => d.HasValue).Cast<DateTime>().ToList();
+            layout.VisibleDates = allDates;
             layout.MinDate = allDates.Any() ? allDates.Min() : DateTime.Now.AddYears(-10);
             layout.MaxDate = allDates.Any() ? allDates.Max() : DateTime.Now;
             if (layout.MinDate == layout.MaxDate) layout.MaxDate = layout.MinDate.AddDays(1);
@@ -137,65 +142,88 @@ namespace MALSpider.Graph
             double GetY(DateTime? date) => layout.Compressor.GetY(date, 100, verticalSpacing);
 
             var columnGroups = new[] {
-                (Title: "LIGHT NOVEL", Clusters: lnClusters),
-                (Title: "MANGA", Clusters: mangaClusters),
-                (Title: "ANIME", Clusters: animeClusters)
+                (Title: "LIGHT NOVEL", LaneIndex: 0, IsVisible: showLN),
+                (Title: "MANGA", LaneIndex: 1, IsVisible: showManga),
+                (Title: "ANIME", LaneIndex: 2, IsVisible: showAnime)
             };
 
             foreach (var group in columnGroups)
             {
-                if (!group.Clusters.Any()) continue;
-                layout.LaneHeaders.Add((group.Title, currentX));
-
-                var occupiedY = new List<(double Top, double Bottom, double X)>();
                 double columnStartX = currentX;
+                var occupiedY = new List<(double Top, double Bottom, double X)>();
 
-                foreach (var cluster in group.Clusters)
+                if (group.IsVisible)
                 {
-                    var orderedCluster = OrderByDateAndRelation(cluster);
-                    double clusterPreferredX = columnStartX;
-                    bool clusterPlaced = false;
-                    int laneShift = 0;
+                    // Find nodes in this lane that are visible, grouped by their original clusters
+                    var nodesByClusterInThisLane = clusters.Select(c => c.Where(n => n.Lane == group.LaneIndex && visibleNodes.Contains(n)).ToList())
+                                                           .Where(c => c.Any())
+                                                           .ToList();
 
-                    while (!clusterPlaced)
+                    if (nodesByClusterInThisLane.Any())
                     {
-                        double testX = columnStartX + laneShift * (nodeWidth + MALSpiderConstants.ClusterHorizontalSpacing);
-                        bool collision = false;
-                        foreach (var node in orderedCluster)
+                        foreach (var clusterNodes in nodesByClusterInThisLane)
                         {
-                            double y = GetY(node.ReleaseDate);
-                            double top = y - MALSpiderConstants.CollisionPadding;
-                            double bottom = y + nodeHeight + MALSpiderConstants.CollisionPadding;
+                            var orderedCluster = OrderByDateAndRelation(clusterNodes);
+                            bool clusterPlaced = false;
+                            int laneShift = 0;
 
-                            if (occupiedY.Any(o => Math.Abs(o.X - testX) < 1.0 && !(bottom < o.Top || top > o.Bottom)))
+                            while (!clusterPlaced)
                             {
-                                collision = true;
-                                break;
+                                double testX = columnStartX + laneShift * (nodeWidth + MALSpiderConstants.ClusterHorizontalSpacing);
+                                bool collision = false;
+                                foreach (var node in orderedCluster)
+                                {
+                                    double y = GetY(node.ReleaseDate);
+                                    double top = y - MALSpiderConstants.CollisionPadding;
+                                    double bottom = y + nodeHeight + MALSpiderConstants.CollisionPadding;
+
+                                    if (occupiedY.Any(o => Math.Abs(o.X - testX) < 1.0 && !(bottom < o.Top || top > o.Bottom)))
+                                    {
+                                        collision = true;
+                                        break;
+                                    }
+                                }
+
+                                if (!collision)
+                                {
+                                    foreach (var node in orderedCluster)
+                                    {
+                                        double y = GetY(node.ReleaseDate);
+                                        layout.NodePositions[node] = new Point(testX, y);
+                                        occupiedY.Add((y, y + nodeHeight, testX));
+                                        maxBottom = Math.Max(maxBottom, y + nodeHeight);
+                                        if (node.IsInputRoot) layout.RootPos = layout.NodePositions[node];
+                                    }
+                                    clusterPlaced = true;
+                                }
+                                else
+                                {
+                                    laneShift++;
+                                }
                             }
                         }
 
-                        if (!collision)
-                        {
-                            foreach (var node in orderedCluster)
-                            {
-                                double y = GetY(node.ReleaseDate);
-                                layout.NodePositions[node] = new Point(testX, y);
-                                occupiedY.Add((y, y + nodeHeight, testX));
-                                maxBottom = Math.Max(maxBottom, y + nodeHeight);
-                                if (node.IsInputRoot) layout.RootPos = layout.NodePositions[node];
-                            }
-                            clusterPlaced = true;
-                        }
-                        else
-                        {
-                            laneShift++;
-                        }
+                        double columnMaxX = occupiedY.Max(o => o.X);
+                        double columnWidth = (columnMaxX + nodeWidth) - columnStartX;
+                        double headerX = columnStartX + (columnWidth - nodeWidth) / 2;
+                        layout.LaneHeaders.Add((group.Title, headerX, group.IsVisible, columnStartX - MALSpiderConstants.HorizontalGap / 2, columnMaxX + nodeWidth + MALSpiderConstants.HorizontalGap / 2));
+
+                        currentX = columnMaxX + nodeWidth + MALSpiderConstants.HorizontalGap;
+                        layout.SeparatorXPositions.Add(currentX - MALSpiderConstants.HorizontalGap / 2);
+                    }
+                    else
+                    {
+                        layout.LaneHeaders.Add((group.Title, currentX, group.IsVisible, currentX - MALSpiderConstants.HorizontalGap / 2, currentX + nodeWidth + MALSpiderConstants.HorizontalGap / 2));
+                        currentX += nodeWidth + MALSpiderConstants.HorizontalGap;
+                        layout.SeparatorXPositions.Add(currentX - MALSpiderConstants.HorizontalGap / 2);
                     }
                 }
-
-                double columnMaxX = occupiedY.Any() ? occupiedY.Max(o => o.X) : currentX;
-                currentX = columnMaxX + nodeWidth + MALSpiderConstants.HorizontalGap;
-                layout.SeparatorXPositions.Add(currentX - MALSpiderConstants.HorizontalGap / 2);
+                else
+                {
+                    layout.LaneHeaders.Add((group.Title, currentX, group.IsVisible, currentX - MALSpiderConstants.HorizontalGap / 2, currentX + nodeWidth + MALSpiderConstants.HorizontalGap / 2));
+                    currentX += nodeWidth + MALSpiderConstants.HorizontalGap;
+                    layout.SeparatorXPositions.Add(currentX - MALSpiderConstants.HorizontalGap / 2);
+                }
             }
 
             if (layout.SeparatorXPositions.Any()) layout.SeparatorXPositions.RemoveAt(layout.SeparatorXPositions.Count - 1);

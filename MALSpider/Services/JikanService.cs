@@ -25,16 +25,20 @@ namespace MALSpider.Services
         private DateTime _lastRequestTime = DateTime.MinValue;
         private readonly TimeSpan _minInterval = TimeSpan.FromSeconds(MALSpiderConstants.JikanMinIntervalSeconds); // Slightly more aggressive with 2 parallel reqs
 
+        private Dictionary<string, EntryNode> _lastVisited = new();
+        private HashSet<string> _lastDiscovered = new();
+        private int _lastTotalDiscovered = 0;
+
         public JikanService()
         {
             _httpClient = new HttpClient();
             _httpClient.DefaultRequestHeaders.Add("User-Agent", "MALSpider/1.0");
 
-            if (!Directory.Exists(MALSpiderConstants.CacheDirectory)) 
+            if (!Directory.Exists(MALSpiderConstants.CacheDirectory))
                 Directory.CreateDirectory(MALSpiderConstants.CacheDirectory);
-            
+
             string imgDir = Path.Combine(MALSpiderConstants.CacheDirectory, "images");
-            if (!Directory.Exists(imgDir)) 
+            if (!Directory.Exists(imgDir))
                 Directory.CreateDirectory(imgDir);
         }
 
@@ -74,26 +78,27 @@ namespace MALSpider.Services
             }
         }
 
-        private async Task<string> GetAsyncWithRateLimit(string url)
+        private async Task<string> GetAsyncWithRateLimit(string url, CancellationToken ct = default)
         {
             await EnsureRateLimit();
-            var response = await _httpClient.GetAsync(url);
+            var response = await _httpClient.GetAsync(url, ct);
             if (response.IsSuccessStatusCode)
             {
-                return await response.Content.ReadAsStringAsync();
+                return await response.Content.ReadAsStringAsync(ct);
             }
             if ((int)response.StatusCode == 429) // Too Many Requests
             {
-                await Task.Delay(MALSpiderConstants.JikanRetryDelayMs); // Wait longer if hit
-                return await GetAsyncWithRateLimit(url);
+                await Task.Delay(MALSpiderConstants.JikanRetryDelayMs, ct); // Wait longer if hit
+                return await GetAsyncWithRateLimit(url, ct);
             }
             return null;
         }
 
-        public async Task<EntryNode> GetFullHierarchy(string searchOrUrl, Action<string> onStatusUpdate = null, Action<EntryNode> onNodeFetched = null)
+        public async Task<EntryNode> GetFullHierarchy(string searchOrUrl, Action<string> onStatusUpdate = null, Action<EntryNode> onNodeFetched = null, CancellationToken ct = default)
         {
             int malId;
             string type;
+            string initialTitle = null;
 
             onStatusUpdate?.Invoke("Searching...");
             if (searchOrUrl.Contains("myanimelist.net"))
@@ -107,31 +112,34 @@ namespace MALSpider.Services
             else
             {
                 // Search by name
-                var searchResult = await Search(searchOrUrl);
+                var searchResult = await Search(searchOrUrl, ct);
                 if (searchResult == null) return null;
                 malId = searchResult.Value.MalId;
                 type = searchResult.Value.Type;
+                initialTitle = searchResult.Value.Title;
             }
 
-            var visited = new Dictionary<string, EntryNode>();
-            var discovered = new HashSet<string>();
-            discovered.Add($"{type}_{malId}");
-            var totalDiscovered = 1;
+            _lastVisited = new Dictionary<string, EntryNode>();
+            _lastDiscovered = new HashSet<string>();
+            _lastDiscovered.Add($"{type}_{malId}");
+            _lastTotalDiscovered = 1;
 
-            var root = await TraverseRecursive(malId, type, visited, discovered, s => onStatusUpdate?.Invoke($"{visited.Count}/{totalDiscovered}: {s}"), () => Interlocked.Increment(ref totalDiscovered), onNodeFetched);
+            var root = await TraverseRecursive(malId, type, _lastVisited, _lastDiscovered, s => onStatusUpdate?.Invoke($"{_lastVisited.Count}/{_lastTotalDiscovered}: {s}"), () => Interlocked.Increment(ref _lastTotalDiscovered), onNodeFetched, initialTitle, ct);
             if (root != null) root.IsInputRoot = true;
             return root;
         }
 
-        private async Task<EntryNode> TraverseRecursive(int malId, string type, Dictionary<string, EntryNode> visited, HashSet<string> discovered, Action<string> onStatusUpdate, Action onNewDiscovered = null, Action<EntryNode> onNodeFetched = null, string fallbackTitle = null)
+        private async Task<EntryNode> TraverseRecursive(int malId, string type, Dictionary<string, EntryNode> visited, HashSet<string> discovered, Action<string> onStatusUpdate, Action onNewDiscovered = null, Action<EntryNode> onNodeFetched = null, string fallbackTitle = null, CancellationToken ct = default)
         {
+            ct.ThrowIfCancellationRequested();
             string key = $"{type}_{malId}";
             lock (visited)
             {
                 if (visited.TryGetValue(key, out var existing)) return existing;
             }
 
-            onStatusUpdate?.Invoke($"Fetching {type} {malId}...");
+            string displayTitle = fallbackTitle ?? $"{type} {malId}";
+            onStatusUpdate?.Invoke($"Fetching {displayTitle}...");
             var node = new EntryNode { MalId = malId, Type = type, Title = fallbackTitle };
             lock (visited)
             {
@@ -151,18 +159,33 @@ namespace MALSpider.Services
 
                 if (json == null)
                 {
-                    if (type == "anime")
+                    int retries = 0;
+                    while (json == null && retries <= MALSpiderConstants.MaxRetries)
                     {
-                        json = await GetAsyncWithRateLimit($"{BaseUrl}/anime/{malId}/full");
-                    }
-                    else if (type == "manga")
-                    {
-                        json = await GetAsyncWithRateLimit($"{BaseUrl}/manga/{malId}/full");
+                        if (retries > 0)
+                        {
+                            onStatusUpdate?.Invoke($"Retrying {displayTitle} ({retries}/{MALSpiderConstants.MaxRetries})...");
+                            await Task.Delay(MALSpiderConstants.JikanRetryDelayMs * retries, ct);
+                        }
+
+                        if (type == "anime")
+                        {
+                            json = await GetAsyncWithRateLimit($"{BaseUrl}/anime/{malId}/full", ct);
+                        }
+                        else if (type == "manga")
+                        {
+                            json = await GetAsyncWithRateLimit($"{BaseUrl}/manga/{malId}/full", ct);
+                        }
+                        retries++;
                     }
 
                     if (json != null)
                     {
                         await File.WriteAllTextAsync(cachePath, json);
+                    }
+                    else
+                    {
+                        node.ErrorMessage = "Failed to fetch data after multiple attempts.";
                     }
                 }
 
@@ -174,6 +197,7 @@ namespace MALSpider.Services
                         if (result?.Data != null)
                         {
                             PopulateNode(node, result.Data);
+                            onStatusUpdate?.Invoke($"Fetching {node.Title}...");
                             node.SourceType = result.Data.Type;
                             relations = result.Data.Relations;
                         }
@@ -188,6 +212,7 @@ namespace MALSpider.Services
                         if (result?.Data != null)
                         {
                             PopulateNode(node, result.Data);
+                            onStatusUpdate?.Invoke($"Fetching {node.Title}...");
                             node.SourceType = result.Data.Type;
                             relations = result.Data.Relations;
                         }
@@ -209,9 +234,12 @@ namespace MALSpider.Services
                 {
                     foreach (var rel in relations)
                     {
+                        string relType = rel.RelationType;
+                        if (MALSpiderConstants.ExcludedRelationTypes.Contains(relType)) continue;
+
                         foreach (var entry in rel.Entry)
                         {
-                            string relType = rel.RelationType;
+                            ct.ThrowIfCancellationRequested();
                             int targetMalId = entry.MalId;
                             string targetType = entry.Type.ToLower();
                             if (targetType != "anime" && targetType != "manga") continue;
@@ -227,7 +255,7 @@ namespace MALSpider.Services
                             }
                             if (isNew) onNewDiscovered?.Invoke();
 
-                            var targetNode = await TraverseRecursive(targetMalId, targetType, visited, discovered, onStatusUpdate, onNewDiscovered, onNodeFetched, entry.Name);
+                            var targetNode = await TraverseRecursive(targetMalId, targetType, visited, discovered, onStatusUpdate, onNewDiscovered, onNodeFetched, entry.Name, ct);
                             if (targetNode != null)
                             {
                                 lock (node.Relations)
@@ -271,12 +299,36 @@ namespace MALSpider.Services
             return node;
         }
 
+        public async Task<bool> RefreshNode(EntryNode node, Action<string> onStatusUpdate = null, Action<EntryNode> onNodeFetched = null, CancellationToken ct = default)
+        {
+            string key = $"{node.Type}_{node.MalId}";
+            string cachePath = Path.Combine(MALSpiderConstants.CacheDirectory, $"{key}.json");
+            if (File.Exists(cachePath)) File.Delete(cachePath);
+
+            node.ErrorMessage = null;
+            node.IsRetrying = true;
+
+            // Remove from visited so TraverseRecursive doesn't just return it
+            lock (_lastVisited)
+            {
+                _lastVisited.Remove(key);
+            }
+
+            // Re-run TraverseRecursive for this node to fetch its data and relations
+            var resultNode = await TraverseRecursive(node.MalId, node.Type, _lastVisited, _lastDiscovered,
+                s => onStatusUpdate?.Invoke($"{_lastVisited.Count}/{_lastTotalDiscovered}: {s}"),
+                () => Interlocked.Increment(ref _lastTotalDiscovered), onNodeFetched, node.Title, ct);
+
+            node.IsRetrying = false;
+            return string.IsNullOrEmpty(node.ErrorMessage);
+        }
+
         private void PopulateNode(EntryNode node, Anime details)
         {
             if (details == null) return;
-            node.Title = details.Title;
             node.TitleEnglish = details.TitleEnglish;
             node.TitleJapanese = details.TitleJapanese;
+            node.Title = GetPreferredTitle(node.TitleEnglish, details.Title, node.TitleJapanese);
             node.ImageUrl = details.Images?.Jpg?.LargeImageUrl ?? details.Images?.Jpg?.ImageUrl;
             node.MalUrl = details.Url;
             node.Synopsis = details.Synopsis;
@@ -287,9 +339,9 @@ namespace MALSpider.Services
         private void PopulateNode(EntryNode node, Manga details)
         {
             if (details == null) return;
-            node.Title = details.Title;
             node.TitleEnglish = details.TitleEnglish;
             node.TitleJapanese = details.TitleJapanese;
+            node.Title = GetPreferredTitle(node.TitleEnglish, details.Title, node.TitleJapanese);
             node.ImageUrl = details.Images?.Jpg?.LargeImageUrl ?? details.Images?.Jpg?.ImageUrl;
             node.MalUrl = details.Url;
             node.Synopsis = details.Synopsis;
@@ -335,18 +387,27 @@ namespace MALSpider.Services
             }
         }
 
-        private async Task<(int MalId, string Type)?> Search(string name)
+        private async Task<(int MalId, string Type, string Title)?> Search(string name, CancellationToken ct = default)
         {
-            var json = await GetAsyncWithRateLimit($"{BaseUrl}/anime?q={Uri.EscapeDataString(name)}&limit=1");
+            var json = await GetAsyncWithRateLimit($"{BaseUrl}/anime?q={Uri.EscapeDataString(name)}&limit=1", ct);
             if (json != null)
             {
                 var result = JsonSerializer.Deserialize<JikanResponse<List<Anime>>>(json);
                 if (result?.Data?.Count > 0)
                 {
-                    return (result.Data[0].MalId, "anime");
+                    var a = result.Data[0];
+                    string title = GetPreferredTitle(a.TitleEnglish, a.Title, a.TitleJapanese);
+                    return (a.MalId, "anime", title);
                 }
             }
             return null;
+        }
+
+        private string GetPreferredTitle(string english, string romaji, string japanese)
+        {
+            if (!string.IsNullOrWhiteSpace(english)) return english;
+            if (!string.IsNullOrWhiteSpace(romaji)) return romaji;
+            return japanese;
         }
     }
 }

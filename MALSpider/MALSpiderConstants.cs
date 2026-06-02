@@ -6,9 +6,10 @@ namespace MALSpider
     {
         // --- Graph Layout Constants ---
         /// <summary>
-        /// Base vertical spacing used for date-to-Y scaling.
+        /// Vertical pixels per compressed year.
+        /// Gaps between consecutive nodes are capped at TimeCompressionThresholdDays.
         /// </summary>
-        public const double VerticalSpacing = 2000;
+        public const double VerticalSpacing = 500;
 
         /// <summary>
         /// Minimum horizontal gap between lanes.
@@ -106,6 +107,7 @@ namespace MALSpider
         public const string JikanBaseUrl = "https://api.jikan.moe/v4";
         public const double JikanMinIntervalSeconds = 0.6;
         public const int JikanRetryDelayMs = 2000;
+        public const int MaxRetries = 3;
 
         // --- Carousel Constants ---
         public const int CarouselMaxItems = 6;
@@ -123,9 +125,17 @@ namespace MALSpider
         /// </summary>
         public const double TimeCompressionThresholdDays = 200;
 
+        // --- Zoom Constants ---
+        public const double MinZoom = 0.1;
+        public const double MaxZoom = 2.0;
+        public const double DefaultZoom = 1.0;
+
         // --- Other Constants ---
         public const string SettingsFile = "settings.json";
         public const string CacheDirectory = "cache";
+
+        // --- Relation Filtering ---
+        public static readonly string[] ExcludedRelationTypes = { "Other", "Character" };
 
         // --- DWM Constants for Dark Mode Title Bar ---
         public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;

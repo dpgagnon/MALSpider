@@ -29,16 +29,28 @@ public partial class MainWindow : Window
     private bool _isLmbPanning;
     private bool _isMmbPanning;
     private bool _isCrawling;
+    private bool _showLN = true;
+    private bool _showManga = true;
+    private bool _showAnime = true;
+    private CancellationTokenSource? _crawlCts;
     private const string SettingsFile = MALSpiderConstants.SettingsFile;
 
     private double HorizontalGap => MALSpiderConstants.HorizontalGap;
-    private double VerticalSpacing => MALSpiderConstants.VerticalSpacing;
     private double VerticalGap => MALSpiderConstants.VerticalGap;
 
     public MainWindow()
     {
         InitializeComponent();
         _renderer = new GraphRenderer(GraphCanvas, HeaderCanvas, TimeCanvas);
+        _renderer.OnNodeRetryRequested = async node => await RetryNode(node);
+        _renderer.OnLaneToggleRequested = (lane, isVisible) =>
+        {
+            if (lane == "LIGHT NOVEL") _showLN = isVisible;
+            else if (lane == "MANGA") _showManga = isVisible;
+            else if (lane == "ANIME") _showAnime = isVisible;
+            RenderGraph(null);
+            SaveSettings();
+        };
         _carousel = new GraphCarousel(LoadingCanvas, _renderer);
         _jikanService.OnNodeImageLoaded = node => Dispatcher.Invoke(() => RenderGraph(node));
         LoadSettings();
@@ -110,6 +122,13 @@ public partial class MainWindow : Window
                             SearchBox.Text = settings.SearchHistory[0];
                         }
                     }
+                    _showLN = settings.ShowLN;
+                    _showManga = settings.ShowManga;
+                    _showAnime = settings.ShowAnime;
+                    if (settings.Zoom >= MALSpiderConstants.MinZoom && settings.Zoom <= MALSpiderConstants.MaxZoom)
+                    {
+                        ZoomSlider.Value = settings.Zoom;
+                    }
                 }
             }
             catch { }
@@ -126,7 +145,11 @@ public partial class MainWindow : Window
                 Width = Width,
                 Height = Height,
                 WindowState = WindowState,
-                SearchHistory = history
+                SearchHistory = history,
+                ShowLN = _showLN,
+                ShowManga = _showManga,
+                ShowAnime = _showAnime,
+                Zoom = ZoomSlider.Value
             };
             var json = JsonSerializer.Serialize(settings);
             File.WriteAllText(SettingsFile, json);
@@ -146,6 +169,10 @@ public partial class MainWindow : Window
         public double Height { get; set; }
         public WindowState WindowState { get; set; }
         public List<string> SearchHistory { get; set; } = new();
+        public bool ShowLN { get; set; } = true;
+        public bool ShowManga { get; set; } = true;
+        public bool ShowAnime { get; set; } = true;
+        public double Zoom { get; set; } = 1.0;
     }
 
     private async void Spider_Click(object sender, RoutedEventArgs e)
@@ -157,6 +184,13 @@ public partial class MainWindow : Window
     {
         _jikanService.ClearCache();
         await StartSpider();
+    }
+
+    private void StopButton_Click(object sender, RoutedEventArgs e)
+    {
+        _crawlCts?.Cancel();
+        StatusLabel.Text = "Stopping...";
+        StopButton.IsEnabled = false;
     }
 
     private async void SearchBox_KeyDown(object sender, KeyEventArgs e)
@@ -193,6 +227,9 @@ public partial class MainWindow : Window
         SearchBox.Text = input;
 
         SearchBox.IsEnabled = false;
+        SpiderButton.Visibility = Visibility.Collapsed;
+        StopButton.Visibility = Visibility.Visible;
+        StopButton.IsEnabled = true;
         StatusLabel.Text = "Crawling...";
         WorkProgressBar.Visibility = Visibility.Visible;
         WorkProgressBar.Value = 0;
@@ -205,6 +242,8 @@ public partial class MainWindow : Window
         {
             _progressiveNodes.Clear();
         }
+
+        _crawlCts = new CancellationTokenSource();
 
         try
         {
@@ -221,7 +260,7 @@ public partial class MainWindow : Window
                 }
             }), node => Dispatcher.Invoke(() => {
                 RenderGraph(node);
-            }));
+            }), _crawlCts.Token);
 
             _isCrawling = false;
             LoadingCanvas.Visibility = Visibility.Collapsed;
@@ -238,6 +277,13 @@ public partial class MainWindow : Window
                 StatusLabel.Text = "Not found.";
             }
         }
+        catch (OperationCanceledException)
+        {
+            _isCrawling = false;
+            StatusLabel.Text = "Stopped.";
+            // Render what we have so far
+            RenderGraph(null);
+        }
         catch (Exception ex)
         {
             MessageBox.Show($"Error: {ex.Message}");
@@ -247,7 +293,12 @@ public partial class MainWindow : Window
         {
             _isCrawling = false;
             SearchBox.IsEnabled = true;
+            SpiderButton.Visibility = Visibility.Visible;
+            StopButton.Visibility = Visibility.Collapsed;
             WorkProgressBar.Visibility = Visibility.Collapsed;
+            LoadingCanvas.Visibility = Visibility.Collapsed;
+            _crawlCts?.Dispose();
+            _crawlCts = null;
         }
     }
 
@@ -255,75 +306,97 @@ public partial class MainWindow : Window
     private readonly HashSet<EntryNode> _progressiveNodes = new();
     private DateTime _lastRenderTime = DateTime.MinValue;
 
-    private void RenderGraph(EntryNode fetchedNode)
+    private async Task RetryNode(EntryNode node)
     {
-        _carousel.AddNode(fetchedNode);
+        if (node.IsRetrying) return;
+        RenderGraph(null); // Show loading state
 
-        lock (_progressiveNodes)
+        await _jikanService.RefreshNode(node, s => Dispatcher.Invoke(() =>
         {
-            _progressiveNodes.Add(fetchedNode);
-            if (fetchedNode.IsInputRoot) _currentRoot = fetchedNode;
+            StatusLabel.Text = s;
+        }), fetchedNode => Dispatcher.Invoke(() =>
+        {
+            RenderGraph(fetchedNode);
+        }));
+
+        RenderGraph(null);
+        StatusLabel.Text = "Graph rebuilt.";
+    }
+
+    private void RenderGraph(EntryNode? fetchedNode)
+    {
+        if (fetchedNode != null)
+        {
+            _carousel.AddNode(fetchedNode);
+
+            lock (_progressiveNodes)
+            {
+                _progressiveNodes.Add(fetchedNode);
+                if (fetchedNode.IsInputRoot) _currentRoot = fetchedNode;
+            }
         }
 
-        if (_currentRoot == null || _isCrawling) return;
+        if (_currentRoot == null) return;
 
         var now = DateTime.Now;
         bool isBusy = StatusLabel.Text == "Crawling..." || StatusLabel.Text.Contains("/") || StatusLabel.Text == "Rendering...";
-        if (isBusy && (now - _lastRenderTime).TotalMilliseconds < 500) return;
+        if (_isCrawling && isBusy && (now - _lastRenderTime).TotalMilliseconds < 500) return;
         _lastRenderTime = now;
 
         var allNodesSet = new HashSet<EntryNode>();
         lock (_progressiveNodes)
         {
-            foreach (var node in _progressiveNodes) allNodesSet.Add(node);
+            foreach (var node in _progressiveNodes)
+            {
+                if (node != null) allNodesSet.Add(node);
+            }
         }
         var traversedNodes = GraphLayoutEngine.GetAllNodes(_currentRoot);
         foreach (var node in traversedNodes) allNodesSet.Add(node);
 
-        var layout = GraphLayoutEngine.ComputeLayout(allNodesSet.ToList(), _renderer.NodeWidth, _renderer.NodeHeight, MALSpiderConstants.VerticalSpacing);
+        var layout = GraphLayoutEngine.ComputeLayout(allNodesSet.ToList(), _renderer.NodeWidth, _renderer.NodeHeight, MALSpiderConstants.VerticalSpacing, _showLN, _showManga, _showAnime);
         _renderer.DrawGraph(layout);
+        _renderer.UpdateHeaderPositions(MainScrollViewer.HorizontalOffset, MainScrollViewer.ViewportWidth);
 
         if (layout.RootPos.X > 0 || layout.RootPos.Y > 0) ScrollToNode(layout.RootPos);
     }
 
     private void MainScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        if (HeaderTransform != null) HeaderTransform.X = -e.HorizontalOffset;
+        _renderer.UpdateHeaderPositions(e.HorizontalOffset, e.ViewportWidth);
         if (TimeTransform != null) TimeTransform.Y = -e.VerticalOffset;
     }
 
     private void ScrollToNode(Point pos)
     {
-        if (GraphCanvas.Parent is ScrollViewer sv)
-        {
-            sv.ScrollToHorizontalOffset(pos.X - sv.ViewportWidth / 2 + _renderer.NodeWidth / 2);
-            sv.ScrollToVerticalOffset(pos.Y - sv.ViewportHeight / 2 + _renderer.NodeHeight / 2);
-        }
+        MainScrollViewer.ScrollToHorizontalOffset(pos.X - MainScrollViewer.ViewportWidth / 2 + _renderer.NodeWidth / 2);
+        MainScrollViewer.ScrollToVerticalOffset(pos.Y - MainScrollViewer.ViewportHeight / 2 + _renderer.NodeHeight / 2);
     }
-
-    private void GraphCanvas_MouseDown(object sender, MouseButtonEventArgs e) { }
 
     private void ScrollViewer_MouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton == MouseButton.Left && !IsMouseOverNode(e.GetPosition(GraphCanvas)))
         {
-            _lastMousePosition = e.GetPosition(this);
+            _lastMousePosition = e.GetPosition(MainScrollViewer);
             _isLmbPanning = true;
             MainScrollViewer.CaptureMouse();
             Cursor = Cursors.SizeAll;
             if (_isMmbPanning) _isMmbPanning = false;
+            e.Handled = true;
         }
         else if (e.ChangedButton == MouseButton.Middle)
         {
             _isMmbPanning = !_isMmbPanning;
             if (_isMmbPanning) { _mmbAnchorPoint = e.GetPosition(MainScrollViewer); MainScrollViewer.CaptureMouse(); Cursor = Cursors.ScrollAll; }
             else { MainScrollViewer.ReleaseMouseCapture(); Cursor = Cursors.Arrow; }
+            e.Handled = true;
         }
         else if (_isMmbPanning && (e.ChangedButton == MouseButton.Left || e.ChangedButton == MouseButton.Right))
         {
             _isMmbPanning = false;
             MainScrollViewer.ReleaseMouseCapture();
             Cursor = Cursors.Arrow;
+            e.Handled = true;
         }
     }
 
@@ -344,12 +417,20 @@ public partial class MainWindow : Window
     {
         if (_isLmbPanning)
         {
-            Point currentPosition = e.GetPosition(this);
+            Point currentPosition = e.GetPosition(MainScrollViewer);
             double deltaX = currentPosition.X - _lastMousePosition.X;
             double deltaY = currentPosition.Y - _lastMousePosition.Y;
-            MainScrollViewer.ScrollToHorizontalOffset(MainScrollViewer.HorizontalOffset - deltaX);
-            MainScrollViewer.ScrollToVerticalOffset(MainScrollViewer.VerticalOffset - deltaY);
-            _lastMousePosition = currentPosition;
+
+            if (Math.Abs(deltaX) > 0 || Math.Abs(deltaY) > 0)
+            {
+                MainScrollViewer.ScrollToHorizontalOffset(MainScrollViewer.HorizontalOffset - deltaX);
+                MainScrollViewer.ScrollToVerticalOffset(MainScrollViewer.VerticalOffset - deltaY);
+                // We don't update _lastMousePosition here because currentPosition relative to MainScrollViewer
+                // changes when we scroll, but we want the delta relative to the VIEWPORT.
+                // Wait! Actually, if we use GetPosition(MainScrollViewer), the viewport DOES NOT move relative to its own coordinate system.
+                // So currentPosition relative to MainScrollViewer only changes if the mouse moves.
+                _lastMousePosition = currentPosition;
+            }
         }
     }
 
@@ -360,6 +441,48 @@ public partial class MainWindow : Window
             _isLmbPanning = false;
             MainScrollViewer.ReleaseMouseCapture();
             Cursor = Cursors.Arrow;
+            e.Handled = true;
+        }
+    }
+
+    private void ScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            double zoomDelta = e.Delta > 0 ? 0.1 : -0.1;
+            double newZoom = Math.Clamp(ZoomSlider.Value + zoomDelta, MALSpiderConstants.MinZoom, MALSpiderConstants.MaxZoom);
+            
+            if (Math.Abs(newZoom - ZoomSlider.Value) > 0.001)
+            {
+                Point mousePos = e.GetPosition(GraphCanvas);
+                
+                // Get mouse position relative to ScrollViewer before zoom
+                Point mouseInViewport = e.GetPosition(MainScrollViewer);
+                
+                ZoomSlider.Value = newZoom;
+                
+                // Forces layout update so we can scroll to the correct position
+                GraphCanvas.UpdateLayout();
+                
+                // Adjust scroll to keep mouse position fixed
+                double newX = (mousePos.X * newZoom) - mouseInViewport.X;
+                double newY = (mousePos.Y * newZoom) - mouseInViewport.Y;
+                
+                MainScrollViewer.ScrollToHorizontalOffset(newX);
+                MainScrollViewer.ScrollToVerticalOffset(newY);
+            }
+            
+            e.Handled = true;
+        }
+    }
+
+    private void ZoomSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (GraphScale != null)
+        {
+            GraphScale.ScaleX = e.NewValue;
+            GraphScale.ScaleY = e.NewValue;
+            SaveSettings();
         }
     }
 
