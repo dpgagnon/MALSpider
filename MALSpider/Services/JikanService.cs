@@ -19,11 +19,10 @@ namespace MALSpider.Services
         private readonly HttpClient _httpClient;
         private static string BaseUrl => MALSpiderConstants.JikanBaseUrl;
 
-        // Jikan rate limit is ~60 requests/min (1 req/sec average)
-        // We'll use a SemaphoreSlim to control concurrency and a delay to ensure we don't burst too fast.
-        private readonly SemaphoreSlim _rateLimitSemaphore = new SemaphoreSlim(2, 2);
-        private DateTime _lastRequestTime = DateTime.MinValue;
-        private readonly TimeSpan _minInterval = TimeSpan.FromSeconds(MALSpiderConstants.JikanMinIntervalSeconds); // Slightly more aggressive with 2 parallel reqs
+        // Jikan rate limit: 2 requests per second, 30 requests per minute.
+        // Cached requests do not count towards the limit.
+        private readonly SemaphoreSlim _rateLimitSemaphore = new SemaphoreSlim(1, 1);
+        private readonly Queue<DateTime> _requestHistory = new Queue<DateTime>();
 
         private Dictionary<string, EntryNode> _lastVisited = new();
         private HashSet<string> _lastDiscovered = new();
@@ -92,13 +91,48 @@ namespace MALSpider.Services
             await _rateLimitSemaphore.WaitAsync();
             try
             {
-                var now = DateTime.Now;
-                var elapsed = now - _lastRequestTime;
-                if (elapsed < _minInterval)
+                while (true)
                 {
-                    await Task.Delay(_minInterval - elapsed);
+                    var now = DateTime.Now;
+
+                    // Remove history older than 1 minute
+                    while (_requestHistory.Count > 0 && (now - _requestHistory.Peek()).TotalSeconds >= 60)
+                    {
+                        _requestHistory.Dequeue();
+                    }
+
+                    // Check per-minute limit
+                    if (_requestHistory.Count >= MALSpiderConstants.JikanRequestsPerMinute)
+                    {
+                        var oldest = _requestHistory.Peek();
+                        var delay = TimeSpan.FromSeconds(60.1) - (now - oldest);
+                        if (delay > TimeSpan.Zero)
+                        {
+                            await Task.Delay(delay);
+                            continue; // Re-evaluate after delay
+                        }
+                    }
+
+                    // Check per-second limit
+                    int requestsInLastSecond = 0;
+                    foreach (var time in _requestHistory)
+                    {
+                        if ((now - time).TotalSeconds < 1)
+                        {
+                            requestsInLastSecond++;
+                        }
+                    }
+
+                    if (requestsInLastSecond >= MALSpiderConstants.JikanRequestsPerSecond)
+                    {
+                        await Task.Delay(100); // Wait a bit and retry
+                        continue;
+                    }
+
+                    // If we get here, we are within limits
+                    _requestHistory.Enqueue(DateTime.Now);
+                    break;
                 }
-                _lastRequestTime = DateTime.Now;
             }
             finally
             {
@@ -161,58 +195,77 @@ namespace MALSpider.Services
             var queue = new Queue<(int MalId, string Type, string Title)>();
 
             string startKey = $"{startType}_{startMalId}";
-            lock (discovered)
+            if (discovered.Add(startKey))
             {
-                if (discovered.Add(startKey))
-                {
-                    _lastTotalDiscovered++;
-                    queue.Enqueue((startMalId, startType, startTitle));
-                }
+                _lastTotalDiscovered++;
+                queue.Enqueue((startMalId, startType, startTitle));
             }
 
             EntryNode rootNode = null;
+            int processedCount = 0;
+            var lastStatusTime = DateTime.MinValue;
 
             while (queue.Count > 0)
             {
                 ct.ThrowIfCancellationRequested();
+
                 var (malId, type, title) = queue.Dequeue();
                 string key = $"{type}_{malId}";
 
                 EntryNode node;
-                lock (visited)
+                bool isNewNode = false;
+                if (!visited.TryGetValue(key, out node))
                 {
-                    if (visited.ContainsKey(key)) continue;
                     node = new EntryNode { MalId = malId, Type = type, Title = title };
                     visited[key] = node;
+                    isNewNode = true;
                 }
 
-                if (rootNode == null) rootNode = node;
+                if (malId == startMalId && type == startType) rootNode = node;
+
+                if (!isNewNode) continue;
 
                 string displayTitle = title ?? $"{type} {malId}";
-                onStatusUpdate?.Invoke($"Fetching {displayTitle}...");
 
-                try
+                // Throttle status updates for cached items to prevent UI lag
+                processedCount++;
+                if ((DateTime.Now - lastStatusTime).TotalMilliseconds > 100)
                 {
-                    List<Relation> relations = null;
-                    string json = null;
-                    string cachePath = Path.Combine(MALSpiderConstants.CacheDirectory, $"{key}.json");
+                    onStatusUpdate?.Invoke($"Fetching {displayTitle}...");
+                    lastStatusTime = DateTime.Now;
+                    await Task.Delay(1, ct); // Yield to UI thread
+                }
 
-                    if (File.Exists(cachePath))
+                List<Relation> relations = null;
+                string json = null;
+                string cachePath = Path.Combine(MALSpiderConstants.CacheDirectory, $"{key}.json");
+
+                if (File.Exists(cachePath))
+                {
+                    try
                     {
-                        json = await File.ReadAllTextAsync(cachePath);
+                        json = await File.ReadAllTextAsync(cachePath, ct);
                     }
-
-                    if (json == null)
+                    catch (Exception ex)
                     {
-                        int retries = 0;
-                        while (json == null && retries <= MALSpiderConstants.MaxRetries)
-                        {
-                            if (retries > 0)
-                            {
-                                onStatusUpdate?.Invoke($"Retrying {displayTitle} ({retries}/{MALSpiderConstants.MaxRetries})...");
-                                await Task.Delay(MALSpiderConstants.JikanRetryDelayMs * retries, ct);
-                            }
+                        Debug.WriteLine($"[DEBUG_LOG] Error reading cache file {cachePath}: {ex.Message}");
+                    }
+                }
 
+                if (json == null)
+                {
+                    int retries = 0;
+                    while (json == null && retries <= MALSpiderConstants.MaxRetries)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        if (retries > 0)
+                        {
+                            onStatusUpdate?.Invoke($"Retrying {displayTitle} ({retries}/{MALSpiderConstants.MaxRetries})...");
+                            await Task.Delay(MALSpiderConstants.JikanRetryDelayMs * retries, ct);
+                        }
+
+                        try
+                        {
                             if (type == "anime")
                             {
                                 json = await GetAsyncWithRateLimit($"{BaseUrl}/anime/{malId}/full", ct);
@@ -221,167 +274,158 @@ namespace MALSpider.Services
                             {
                                 json = await GetAsyncWithRateLimit($"{BaseUrl}/manga/{malId}/full", ct);
                             }
-                            retries++;
                         }
-
-                        if (json != null)
+                        catch (Exception ex)
                         {
-                            // Verify JSON is actually valid data before caching
-                            bool isValid = false;
-                            if (type == "anime") isValid = JsonSerializer.Deserialize<JikanResponse<AnimeFull>>(json)?.Data != null;
-                            else if (type == "manga") isValid = JsonSerializer.Deserialize<JikanResponse<MangaFull>>(json)?.Data != null;
-
-                            if (isValid)
-                            {
-                                await File.WriteAllTextAsync(cachePath, json);
-                            }
-                            else
-                            {
-                                // Don't cache invalid data
-                                json = null;
-                            }
+                            Debug.WriteLine($"[DEBUG_LOG] Error in API call for {displayTitle}: {ex.Message}");
                         }
-                        else
-                        {
-                            node.ErrorMessage = "Failed to fetch data after multiple attempts.";
-                        }
+                        retries++;
                     }
 
                     if (json != null)
                     {
-                        bool isDataValid = false;
-                        if (type == "anime")
+                        bool isValid = false;
+                        try
                         {
-                            var result = JsonSerializer.Deserialize<JikanResponse<AnimeFull>>(json);
-                            if (result?.Data != null)
-                            {
-                                PopulateNode(node, result.Data);
-                                onStatusUpdate?.Invoke($"Fetching {node.Title}...");
-                                node.SourceType = result.Data.Type;
-                                relations = result.Data.Relations;
-                                isDataValid = true;
-                            }
-                            else
-                            {
-                                node.ErrorMessage = "Malformed API response (Anime)";
-                            }
+                            if (type == "anime") isValid = JsonSerializer.Deserialize<JikanResponse<AnimeFull>>(json)?.Data != null;
+                            else if (type == "manga") isValid = JsonSerializer.Deserialize<JikanResponse<MangaFull>>(json)?.Data != null;
                         }
-                        else if (type == "manga")
-                        {
-                            var result = JsonSerializer.Deserialize<JikanResponse<MangaFull>>(json);
-                            if (result?.Data != null)
-                            {
-                                PopulateNode(node, result.Data);
-                                onStatusUpdate?.Invoke($"Fetching {node.Title}...");
-                                node.SourceType = result.Data.Type;
-                                relations = result.Data.Relations;
-                                isDataValid = true;
-                            }
-                            else
-                            {
-                                node.ErrorMessage = "Malformed API response (Manga)";
-                            }
-                        }
+                        catch { }
 
-                        // Backfix: if we loaded from cache but it was invalid, delete it so we can try again next time
-                        if (!isDataValid && File.Exists(cachePath))
+                        if (isValid)
                         {
-                            try { File.Delete(cachePath); } catch { /* Ignore delete errors */ }
-                            // After deleting, we might want to trigger a fetch, but TraverseIterative is complex.
-                            // For now, it will just mark as error for this session, and next session will re-fetch.
+                            try
+                            {
+                                await File.WriteAllTextAsync(cachePath, json, ct);
+                            }
+                            catch (Exception ex)
+                            {
+                                Debug.WriteLine($"[DEBUG_LOG] Error writing cache file {cachePath}: {ex.Message}");
+                            }
+                        }
+                        else
+                        {
+                            json = null;
                         }
                     }
                     else
                     {
-                        node.ErrorMessage = $"Failed to fetch data or not found ({type})";
+                        node.ErrorMessage = "Failed to fetch data after multiple attempts.";
+                    }
+                }
+
+                if (json != null)
+                {
+                    bool isDataValid = false;
+                    if (type == "anime")
+                    {
+                        var result = JsonSerializer.Deserialize<JikanResponse<AnimeFull>>(json);
+                        if (result?.Data != null)
+                        {
+                            PopulateNode(node, result.Data);
+
+                            if ((DateTime.Now - lastStatusTime).TotalMilliseconds > 100)
+                            {
+                                onStatusUpdate?.Invoke($"Fetching {node.Title}...");
+                                lastStatusTime = DateTime.Now;
+                            }
+
+                            node.SourceType = result.Data.Type;
+                            relations = result.Data.Relations;
+                            isDataValid = true;
+                        }
+                        else { node.ErrorMessage = "Malformed API response (Anime)"; }
+                    }
+                    else if (type == "manga")
+                    {
+                        var result = JsonSerializer.Deserialize<JikanResponse<MangaFull>>(json);
+                        if (result?.Data != null)
+                        {
+                            PopulateNode(node, result.Data);
+
+                            if ((DateTime.Now - lastStatusTime).TotalMilliseconds > 100)
+                            {
+                                onStatusUpdate?.Invoke($"Fetching {node.Title}...");
+                                lastStatusTime = DateTime.Now;
+                            }
+
+                            node.SourceType = result.Data.Type;
+                            relations = result.Data.Relations;
+                            isDataValid = true;
+                        }
+                        else { node.ErrorMessage = "Malformed API response (Manga)"; }
                     }
 
-                    // Notify that this node's details are now available
-                    onNodeFetched?.Invoke(node);
-
-                    if (relations != null)
+                    if (!isDataValid && File.Exists(cachePath))
                     {
-                        foreach (var rel in relations)
+                        try { File.Delete(cachePath); } catch { }
+                    }
+                }
+                else if (node.ErrorMessage == null)
+                {
+                    node.ErrorMessage = $"Failed to fetch data or not found ({type})";
+                }
+
+                onNodeFetched?.Invoke(node);
+
+                if (relations != null)
+                {
+                    foreach (var rel in relations)
+                    {
+                        string relType = rel.RelationType;
+                        if (MALSpiderConstants.ExcludedRelationTypes.Contains(relType)) continue;
+
+                        foreach (var entry in rel.Entry)
                         {
-                            string relType = rel.RelationType;
-                            if (MALSpiderConstants.ExcludedRelationTypes.Contains(relType)) continue;
+                            int targetMalId = entry.MalId;
+                            string targetType = entry.Type.ToLower();
+                            if (targetType != "anime" && targetType != "manga") continue;
 
-                            foreach (var entry in rel.Entry)
+                            string targetKey = $"{targetType}_{targetMalId}";
+
+                            if (discovered.Add(targetKey))
                             {
-                                int targetMalId = entry.MalId;
-                                string targetType = entry.Type.ToLower();
-                                if (targetType != "anime" && targetType != "manga") continue;
+                                _lastTotalDiscovered++;
+                                queue.Enqueue((targetMalId, targetType, entry.Name));
+                            }
 
-                                string targetKey = $"{targetType}_{targetMalId}";
+                            visited.TryGetValue(targetKey, out var targetNode);
 
-                                lock (discovered)
+                            if (targetNode != null)
+                            {
+                                if (!node.Relations.Any(r => r.Target == targetNode))
                                 {
-                                    if (discovered.Add(targetKey))
+                                    string relationType = relType;
+                                    var backRel = targetNode.Relations.FirstOrDefault(r => r.Target == node);
+                                    if (backRel != null)
                                     {
-                                        _lastTotalDiscovered++;
-                                        queue.Enqueue((targetMalId, targetType, entry.Name));
-                                    }
-                                }
-
-                                // Link nodes if target already visited
-                                EntryNode targetNode;
-                                lock (visited)
-                                {
-                                    visited.TryGetValue(targetKey, out targetNode);
-                                }
-
-                                if (targetNode != null)
-                                {
-                                    lock (node.Relations)
-                                    {
-                                        if (!node.Relations.Any(r => r.Target == targetNode))
+                                        if ((relationType == "Parent story" && backRel.RelationType == "Side story") ||
+                                            (relationType == "Side story" && backRel.RelationType == "Parent story"))
                                         {
-                                            string relationType = relType;
-                                            lock (targetNode.Relations)
-                                            {
-                                                var backRel = targetNode.Relations.FirstOrDefault(r => r.Target == node);
-                                                if (backRel != null)
-                                                {
-                                                    if ((relationType == "Parent story" && backRel.RelationType == "Side story") ||
-                                                        (relationType == "Side story" && backRel.RelationType == "Parent story"))
-                                                    {
-                                                        relationType = "Side story";
-                                                        backRel.RelationType = "Side story";
-                                                    }
-                                                }
-                                            }
-
-                                            node.Relations.Add(new EntryRelation
-                                            {
-                                                RelationType = relationType,
-                                                Target = targetNode
-                                            });
-
-                                            // Also add the back-link if it doesn't exist to ensure connectivity for the renderer
-                                            lock (targetNode.Relations)
-                                            {
-                                                if (!targetNode.Relations.Any(r => r.Target == node))
-                                                {
-                                                    string inferredBackType = Graph.GraphConnectivity.InvertRelationType(relationType);
-
-                                                    targetNode.Relations.Add(new EntryRelation
-                                                    {
-                                                        RelationType = inferredBackType,
-                                                        Target = node
-                                                    });
-                                                }
-                                            }
+                                            relationType = "Side story";
+                                            backRel.RelationType = "Side story";
                                         }
+                                    }
+
+                                    node.Relations.Add(new EntryRelation
+                                    {
+                                        RelationType = relationType,
+                                        Target = targetNode
+                                    });
+
+                                    if (!targetNode.Relations.Any(r => r.Target == node))
+                                    {
+                                        string inferredBackType = Graph.GraphConnectivity.InvertRelationType(relationType);
+                                        targetNode.Relations.Add(new EntryRelation
+                                        {
+                                            RelationType = inferredBackType,
+                                            Target = node
+                                        });
                                     }
                                 }
                             }
                         }
                     }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[DEBUG_LOG] Error fetching {key}: {ex.Message}");
-                    node.ErrorMessage = ex.Message;
                 }
             }
 
@@ -409,17 +453,11 @@ namespace MALSpider.Services
             node.IsRetrying = true;
 
             // Remove from visited so TraverseIterative doesn't just skip it
-            lock (_lastVisited)
-            {
-                _lastVisited.Remove(key);
-            }
+            _lastVisited.Remove(key);
 
             // Also remove from discovered to allow re-queueing
-            lock (_lastDiscovered)
-            {
-                _lastDiscovered.Remove(key);
-                _lastTotalDiscovered--;
-            }
+            _lastDiscovered.Remove(key);
+            _lastTotalDiscovered--;
 
             // Re-run TraverseIterative for this node to fetch its data and relations
             var resultNode = await TraverseIterative(node.MalId, node.Type, _lastVisited, _lastDiscovered,

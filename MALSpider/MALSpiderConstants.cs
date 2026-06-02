@@ -52,6 +52,16 @@ namespace MALSpider
         public const double CanvasWidthMargin = 40;
 
         /// <summary>
+        /// Extra padding on the left to allow panning beyond the first lane.
+        /// </summary>
+        public const double GraphPaddingX = 10000;
+
+        /// <summary>
+        /// Extra padding on the top to allow panning above the graph.
+        /// </summary>
+        public const double GraphPaddingY = 10000;
+
+        /// <summary>
         /// Margin added to the bottom of the canvas.
         /// </summary>
         public const double CanvasHeightMargin = 100;
@@ -105,7 +115,8 @@ namespace MALSpider
 
         // --- Jikan Service Constants ---
         public const string JikanBaseUrl = "https://api.jikan.moe/v4";
-        public const double JikanMinIntervalSeconds = 0.6;
+        public const int JikanRequestsPerSecond = 2;
+        public const int JikanRequestsPerMinute = 120;
         public const int JikanRetryDelayMs = 2000;
         public const int MaxRetries = 3;
 
@@ -141,13 +152,13 @@ namespace MALSpider
         /// Relation types that should cause a horizontal shift instead of vertical alignment.
         /// Only "Sequel" (and implicitly "Prequel") relations usually stay vertical.
         /// </summary>
-        public static readonly string[] HorizontalRelationTypes = 
-        { 
-            "Side story", 
-            "Spin-off", 
-            "Alternative version", 
-            "Alternative setting", 
-            "Other" 
+        public static readonly string[] HorizontalRelationTypes =
+        {
+            "Side story",
+            "Spin-off",
+            "Alternative version",
+            "Alternative setting",
+            "Other"
         };
 
         // --- DWM Constants for Dark Mode Title Bar ---

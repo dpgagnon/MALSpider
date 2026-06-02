@@ -26,14 +26,17 @@ namespace MALSpider.Graph
         private readonly Dictionary<EntryNode, List<Shape>> _nodeToConnections = new();
         private readonly Dictionary<Shape, (EntryNode Source, EntryNode Target, bool IsDownward)> _connectionInfo = new();
 
+        private NodeLayout? _lastLayout;
+
         public GraphRenderer(Canvas graphCanvas, Canvas timeCanvas)
         {
             _graphCanvas = graphCanvas;
             _timeCanvas = timeCanvas;
         }
 
-        public void DrawGraph(NodeLayout layout)
+        public void DrawGraph(NodeLayout layout, double zoom = 1.0)
         {
+            _lastLayout = layout;
             _graphCanvas.Children.Clear();
             _timeCanvas.Children.Clear();
             _nodeToBorder.Clear();
@@ -41,7 +44,7 @@ namespace MALSpider.Graph
             _connectionInfo.Clear();
 
             // 1. Draw Axis
-            DrawTimeAxis(layout.MinDate, layout.MaxDate, layout.VisibleDates, date => layout.Compressor.GetY(date, 100, MALSpiderConstants.VerticalSpacing));
+            RedrawTimeAxis(zoom);
 
             // 3. Draw Nodes
             foreach (var entry in layout.NodePositions)
@@ -109,10 +112,11 @@ namespace MALSpider.Graph
 
             // Repeating vertical text
             double canvasHeight = _graphCanvas.Height;
-            if (double.IsNaN(canvasHeight)) canvasHeight = 3000;
-            else canvasHeight = Math.Max(3000, canvasHeight);
+            if (double.IsNaN(canvasHeight)) canvasHeight = 10000;
+            else canvasHeight = Math.Max(10000, canvasHeight);
 
-            for (double y = 100; y < canvasHeight; y += 200)
+            double maxY = canvasHeight - MALSpiderConstants.GraphPaddingY;
+            for (double y = MALSpiderConstants.GraphPaddingY; y < maxY; y += 200)
             {
                 var tb = new TextBlock
                 {
@@ -137,15 +141,17 @@ namespace MALSpider.Graph
         public void DrawVerticalSeparator(double x)
         {
             double height = _graphCanvas.Height;
-            if (double.IsNaN(height)) height = 1000;
-            else height = Math.Max(1000, height);
+            if (double.IsNaN(height)) height = 10000;
+            else height = Math.Max(10000, height);
+
+            double maxY = height - MALSpiderConstants.GraphPaddingY;
 
             var line = new Line
             {
                 X1 = x,
-                Y1 = 0,
+                Y1 = MALSpiderConstants.GraphPaddingY,
                 X2 = x,
-                Y2 = height,
+                Y2 = maxY,
                 Stroke = new SolidColorBrush(MALSpiderConstants.PrimaryAccentColor),
                 StrokeThickness = 4,
                 Opacity = 0.3
@@ -165,8 +171,8 @@ namespace MALSpider.Graph
 
         public void UpdateCanvasSize(double width, double height)
         {
-            _graphCanvas.Width = width;
-            _graphCanvas.Height = height;
+            _graphCanvas.Width = width + MALSpiderConstants.GraphPaddingX;
+            _graphCanvas.Height = height + MALSpiderConstants.GraphPaddingY;
         }
 
         public Border GetBorderForNode(EntryNode node)
@@ -176,6 +182,7 @@ namespace MALSpider.Graph
 
         public void DrawTimeAxis(DateTime minDate, DateTime maxDate, List<DateTime> visibleDates, Func<DateTime?, double> getYForDate)
         {
+            _timeCanvas.Children.Clear();
             int startYear = minDate.Year;
             int endYear = maxDate.Year;
 
@@ -187,7 +194,8 @@ namespace MALSpider.Graph
                 var yearDate = new DateTime(year, 1, 1);
                 if (yearDate < minDate) yearDate = minDate;
                 if (yearDate > maxDate) yearDate = maxDate;
-                yearPlacements.Add((year, getYForDate(yearDate), yearsWithNodes.Contains(year)));
+                double y = getYForDate(yearDate) + MALSpiderConstants.GraphPaddingY;
+                yearPlacements.Add((year, y, yearsWithNodes.Contains(year)));
             }
 
             for (int i = 0; i < yearPlacements.Count; i++)
@@ -244,7 +252,7 @@ namespace MALSpider.Graph
                     {
                         var monthDate = new DateTime(current.Year, month, 1);
                         if (monthDate > maxDate || monthDate < minDate) continue;
-                        double my = getYForDate(monthDate);
+                        double my = getYForDate(monthDate) + MALSpiderConstants.GraphPaddingY;
 
                         // Don't draw month if too close to year labels
                         if (Math.Abs(my - current.Y) < 15) continue;
@@ -262,6 +270,13 @@ namespace MALSpider.Graph
                     }
                 }
             }
+        }
+
+        public void RedrawTimeAxis(double zoom)
+        {
+            if (_lastLayout == null) return;
+            DrawTimeAxis(_lastLayout.MinDate, _lastLayout.MaxDate, _lastLayout.VisibleDates,
+                date => (_lastLayout.Compressor.GetY(date, 100, MALSpiderConstants.VerticalSpacing) + MALSpiderConstants.GraphPaddingY) * zoom - MALSpiderConstants.GraphPaddingY);
         }
 
         public void DrawNode(EntryNode node, Point pos)

@@ -206,10 +206,12 @@ namespace MALSpider.Graph
             var clusters = ClusterNodes(allNodes);
 
             // Filter nodes based on their lane and the user's selected visibility
+            // Also exclude nodes that failed to load (have an ErrorMessage)
             var visibleNodes = allNodes.Where(n =>
+                string.IsNullOrEmpty(n.ErrorMessage) && (
                 (n.Lane == 0 && showLN) ||
                 (n.Lane == 1 && showManga) ||
-                (n.Lane == 2 && showAnime)).ToHashSet();
+                (n.Lane == 2 && showAnime))).ToHashSet();
 
             var allDates = visibleNodes.Select(n => n.ReleaseDate).Where(d => d.HasValue).Cast<DateTime>().ToList();
             layout.VisibleDates = allDates;
@@ -219,10 +221,10 @@ namespace MALSpider.Graph
 
             layout.Compressor = new TimeCompressor(layout.MinDate, layout.MaxDate, allDates);
 
-            double currentX = 0;
+            double currentX = MALSpiderConstants.GraphPaddingX;
             double maxBottom = 0;
 
-            double GetY(DateTime? date) => layout.Compressor.GetY(date, 100, verticalSpacing);
+            double GetY(DateTime? date) => layout.Compressor.GetY(date, 100, verticalSpacing) + MALSpiderConstants.GraphPaddingY;
 
             var columnGroups = new[] {
                 (Title: "LIGHT NOVEL", LaneIndex: 0, IsVisible: showLN),
@@ -352,9 +354,34 @@ namespace MALSpider.Graph
                                     foreach (var node in orderedCluster)
                                     {
                                         var pos = testPositions[node];
-                                        layout.NodePositions[node] = pos;
-                                        occupiedY.Add((pos.Y, pos.Y + nodeHeight, pos.X));
-                                        maxBottom = Math.Max(maxBottom, pos.Y + nodeHeight);
+
+                                        // Refined Y-collision resolution for nodes in the same column
+                                        double resolvedY = pos.Y;
+                                        bool yCollision;
+                                        do
+                                        {
+                                            yCollision = false;
+                                            foreach (var occupied in occupiedY)
+                                            {
+                                                // If in the same horizontal position (column)
+                                                if (Math.Abs(occupied.X - pos.X) < 1.0)
+                                                {
+                                                    double top = resolvedY - MALSpiderConstants.CollisionPadding;
+                                                    double bottom = resolvedY + nodeHeight + MALSpiderConstants.CollisionPadding;
+
+                                                    if (!(bottom < occupied.Top || top > occupied.Bottom))
+                                                    {
+                                                        resolvedY = occupied.Bottom + MALSpiderConstants.VerticalGap;
+                                                        yCollision = true;
+                                                    }
+                                                }
+                                            }
+                                        } while (yCollision);
+
+                                        var finalPos = new Point(pos.X, resolvedY);
+                                        layout.NodePositions[node] = finalPos;
+                                        occupiedY.Add((finalPos.Y, finalPos.Y + nodeHeight, finalPos.X));
+                                        maxBottom = Math.Max(maxBottom, finalPos.Y + nodeHeight);
                                         if (node.IsInputRoot) layout.RootPos = layout.NodePositions[node];
                                     }
                                     clusterPlaced = true;
