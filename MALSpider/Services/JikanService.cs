@@ -1,28 +1,58 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Media.Imaging;
+using System.Diagnostics;
+using System.Linq;
 using MALSpider.Models;
 
 namespace MALSpider.Services
 {
     public class JikanService
     {
+        public Action<EntryNode>? OnNodeImageLoaded { get; set; }
         private readonly HttpClient _httpClient;
-        private const string BaseUrl = "https://api.jikan.moe/v4";
-        
+        private static string BaseUrl => MALSpiderConstants.JikanBaseUrl;
+
         // Jikan rate limit is ~60 requests/min (1 req/sec average)
         // We'll use a SemaphoreSlim to control concurrency and a delay to ensure we don't burst too fast.
         private readonly SemaphoreSlim _rateLimitSemaphore = new SemaphoreSlim(2, 2);
         private DateTime _lastRequestTime = DateTime.MinValue;
-        private readonly TimeSpan _minInterval = TimeSpan.FromSeconds(0.6); // Slightly more aggressive with 2 parallel reqs
+        private readonly TimeSpan _minInterval = TimeSpan.FromSeconds(MALSpiderConstants.JikanMinIntervalSeconds); // Slightly more aggressive with 2 parallel reqs
 
         public JikanService()
         {
             _httpClient = new HttpClient();
             _httpClient.DefaultRequestHeaders.Add("User-Agent", "MALSpider/1.0");
+
+            if (!Directory.Exists(MALSpiderConstants.CacheDirectory)) 
+                Directory.CreateDirectory(MALSpiderConstants.CacheDirectory);
+            
+            string imgDir = Path.Combine(MALSpiderConstants.CacheDirectory, "images");
+            if (!Directory.Exists(imgDir)) 
+                Directory.CreateDirectory(imgDir);
+        }
+
+        public void ClearCache()
+        {
+            try
+            {
+                if (Directory.Exists(MALSpiderConstants.CacheDirectory))
+                {
+                    Directory.Delete(MALSpiderConstants.CacheDirectory, true);
+                    Directory.CreateDirectory(MALSpiderConstants.CacheDirectory);
+                    Directory.CreateDirectory(Path.Combine(MALSpiderConstants.CacheDirectory, "images"));
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[DEBUG_LOG] Failed to clear cache: {ex.Message}");
+            }
         }
 
         private async Task EnsureRateLimit()
@@ -54,7 +84,7 @@ namespace MALSpider.Services
             }
             if ((int)response.StatusCode == 429) // Too Many Requests
             {
-                await Task.Delay(2000); // Wait longer if hit
+                await Task.Delay(MALSpiderConstants.JikanRetryDelayMs); // Wait longer if hit
                 return await GetAsyncWithRateLimit(url);
             }
             return null;
@@ -84,14 +114,16 @@ namespace MALSpider.Services
             }
 
             var visited = new Dictionary<string, EntryNode>();
+            var discovered = new HashSet<string>();
+            discovered.Add($"{type}_{malId}");
             var totalDiscovered = 1;
-    
-            var root = await TraverseRecursive(malId, type, visited, s => onStatusUpdate?.Invoke($"{visited.Count}/{totalDiscovered}: {s}"), () => Interlocked.Increment(ref totalDiscovered), onNodeFetched);
+
+            var root = await TraverseRecursive(malId, type, visited, discovered, s => onStatusUpdate?.Invoke($"{visited.Count}/{totalDiscovered}: {s}"), () => Interlocked.Increment(ref totalDiscovered), onNodeFetched);
             if (root != null) root.IsInputRoot = true;
             return root;
         }
 
-        private async Task<EntryNode> TraverseRecursive(int malId, string type, Dictionary<string, EntryNode> visited, Action<string> onStatusUpdate, Action onNewDiscovered = null, Action<EntryNode> onNodeFetched = null)
+        private async Task<EntryNode> TraverseRecursive(int malId, string type, Dictionary<string, EntryNode> visited, HashSet<string> discovered, Action<string> onStatusUpdate, Action onNewDiscovered = null, Action<EntryNode> onNodeFetched = null, string fallbackTitle = null)
         {
             string key = $"{type}_{malId}";
             lock (visited)
@@ -100,7 +132,7 @@ namespace MALSpider.Services
             }
 
             onStatusUpdate?.Invoke($"Fetching {type} {malId}...");
-            var node = new EntryNode { MalId = malId, Type = type };
+            var node = new EntryNode { MalId = malId, Type = type, Title = fallbackTitle };
             lock (visited)
             {
                 visited[key] = node;
@@ -109,10 +141,34 @@ namespace MALSpider.Services
             try
             {
                 List<Relation> relations = null;
-                if (type == "anime")
+                string json = null;
+                string cachePath = Path.Combine(MALSpiderConstants.CacheDirectory, $"{key}.json");
+
+                if (File.Exists(cachePath))
                 {
-                    var json = await GetAsyncWithRateLimit($"{BaseUrl}/anime/{malId}/full");
+                    json = await File.ReadAllTextAsync(cachePath);
+                }
+
+                if (json == null)
+                {
+                    if (type == "anime")
+                    {
+                        json = await GetAsyncWithRateLimit($"{BaseUrl}/anime/{malId}/full");
+                    }
+                    else if (type == "manga")
+                    {
+                        json = await GetAsyncWithRateLimit($"{BaseUrl}/manga/{malId}/full");
+                    }
+
                     if (json != null)
+                    {
+                        await File.WriteAllTextAsync(cachePath, json);
+                    }
+                }
+
+                if (json != null)
+                {
+                    if (type == "anime")
                     {
                         var result = JsonSerializer.Deserialize<JikanResponse<AnimeFull>>(json);
                         if (result?.Data != null)
@@ -121,12 +177,12 @@ namespace MALSpider.Services
                             node.SourceType = result.Data.Type;
                             relations = result.Data.Relations;
                         }
+                        else
+                        {
+                            node.ErrorMessage = "Malformed API response (Anime)";
+                        }
                     }
-                }
-                else if (type == "manga")
-                {
-                    var json = await GetAsyncWithRateLimit($"{BaseUrl}/manga/{malId}/full");
-                    if (json != null)
+                    else if (type == "manga")
                     {
                         var result = JsonSerializer.Deserialize<JikanResponse<MangaFull>>(json);
                         if (result?.Data != null)
@@ -135,7 +191,15 @@ namespace MALSpider.Services
                             node.SourceType = result.Data.Type;
                             relations = result.Data.Relations;
                         }
+                        else
+                        {
+                            node.ErrorMessage = "Malformed API response (Manga)";
+                        }
                     }
+                }
+                else
+                {
+                    node.ErrorMessage = $"Failed to fetch data or not found ({type})";
                 }
 
                 // Notify that this node's details are now available
@@ -143,29 +207,38 @@ namespace MALSpider.Services
 
                 if (relations != null)
                 {
-                    var tasks = new List<Task>();
                     foreach (var rel in relations)
                     {
                         foreach (var entry in rel.Entry)
                         {
-                            onNewDiscovered?.Invoke();
                             string relType = rel.RelationType;
                             int targetMalId = entry.MalId;
                             string targetType = entry.Type.ToLower();
+                            if (targetType != "anime" && targetType != "manga") continue;
 
-                            var task = TraverseRecursive(targetMalId, targetType, visited, onStatusUpdate, onNewDiscovered, onNodeFetched).ContinueWith(t =>
+                            string targetKey = $"{targetType}_{targetMalId}";
+                            bool isNew = false;
+                            lock (discovered)
                             {
-                                if (t.Result != null)
+                                if (discovered.Add(targetKey))
                                 {
-                                    lock (node.Relations)
-                                    {
-                                        if (node.Relations.Any(r => r.Target == t.Result)) return;
+                                    isNew = true;
+                                }
+                            }
+                            if (isNew) onNewDiscovered?.Invoke();
 
+                            var targetNode = await TraverseRecursive(targetMalId, targetType, visited, discovered, onStatusUpdate, onNewDiscovered, onNodeFetched, entry.Name);
+                            if (targetNode != null)
+                            {
+                                lock (node.Relations)
+                                {
+                                    if (!node.Relations.Any(r => r.Target == targetNode))
+                                    {
                                         string relationType = relType;
                                         // Requirement: "when choosing between 'parent story' and 'side story' for bidirectional links, always choose 'side story' -- this is a downward relationship"
-                                        lock (t.Result.Relations)
+                                        lock (targetNode.Relations)
                                         {
-                                            var backRel = t.Result.Relations.FirstOrDefault(r => r.Target == node);
+                                            var backRel = targetNode.Relations.FirstOrDefault(r => r.Target == node);
                                             if (backRel != null)
                                             {
                                                 if ((relationType == "Parent story" && backRel.RelationType == "Side story") ||
@@ -180,40 +253,19 @@ namespace MALSpider.Services
                                         node.Relations.Add(new EntryRelation
                                         {
                                             RelationType = relationType,
-                                            Target = t.Result
+                                            Target = targetNode
                                         });
-                                    }
-                                }
-                            });
-                            tasks.Add(task);
-
-                            // For progressive rendering: add the node to relations as soon as it's available in 'visited'
-                            // so that the graph can start drawing connections to "skeleton" nodes.
-                            lock (visited)
-                            {
-                                if (visited.TryGetValue($"{targetType}_{targetMalId}", out var targetNode))
-                                {
-                                    lock (node.Relations)
-                                    {
-                                        if (!node.Relations.Any(r => r.Target == targetNode))
-                                        {
-                                            node.Relations.Add(new EntryRelation
-                                            {
-                                                RelationType = relType,
-                                                Target = targetNode
-                                            });
-                                        }
                                     }
                                 }
                             }
                         }
                     }
-                    await Task.WhenAll(tasks);
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[DEBUG_LOG] Error fetching {key}: {ex.Message}");
+                node.ErrorMessage = ex.Message;
             }
 
             return node;
@@ -229,6 +281,7 @@ namespace MALSpider.Services
             node.MalUrl = details.Url;
             node.Synopsis = details.Synopsis;
             node.ReleaseDate = details.Aired?.From;
+            _ = LoadImageAsync(node);
         }
 
         private void PopulateNode(EntryNode node, Manga details)
@@ -241,6 +294,45 @@ namespace MALSpider.Services
             node.MalUrl = details.Url;
             node.Synopsis = details.Synopsis;
             node.ReleaseDate = details.Published?.From;
+            _ = LoadImageAsync(node);
+        }
+
+        private async Task LoadImageAsync(EntryNode node)
+        {
+            if (string.IsNullOrEmpty(node.ImageUrl)) return;
+            try
+            {
+                string extension = Path.GetExtension(node.ImageUrl);
+                if (string.IsNullOrEmpty(extension)) extension = ".jpg";
+                string cachePath = Path.Combine(MALSpiderConstants.CacheDirectory, "images", $"{node.Type}_{node.MalId}{extension}");
+
+                byte[] bytes;
+                if (File.Exists(cachePath))
+                {
+                    bytes = await File.ReadAllBytesAsync(cachePath);
+                }
+                else
+                {
+                    bytes = await _httpClient.GetByteArrayAsync(node.ImageUrl);
+                    await File.WriteAllBytesAsync(cachePath, bytes);
+                }
+
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    var bitmap = new BitmapImage();
+                    bitmap.BeginInit();
+                    bitmap.StreamSource = new MemoryStream(bytes);
+                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    bitmap.EndInit();
+                    bitmap.Freeze();
+                    node.LoadedImage = bitmap;
+                    OnNodeImageLoaded?.Invoke(node);
+                });
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[DEBUG_LOG] Failed to load image for {node.Title}: {ex.Message}");
+            }
         }
 
         private async Task<(int MalId, string Type)?> Search(string name)

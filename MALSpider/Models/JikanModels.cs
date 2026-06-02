@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
+using System.Windows.Media.Imaging;
 
 namespace MALSpider.Models
 {
@@ -145,10 +146,13 @@ namespace MALSpider.Models
         public string TitleEnglish { get; set; }
         public string TitleJapanese { get; set; }
         public string ImageUrl { get; set; }
+        public BitmapSource? LoadedImage { get; set; }
         public string MalUrl { get; set; }
         public string Synopsis { get; set; }
         public DateTime? ReleaseDate { get; set; }
         public bool IsInputRoot { get; set; }
+        public string? ErrorMessage { get; set; }
+        public int Lane { get; set; }
         public List<EntryRelation> Relations { get; set; } = new List<EntryRelation>();
     }
 
