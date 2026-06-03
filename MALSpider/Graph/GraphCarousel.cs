@@ -75,7 +75,16 @@ namespace MALSpider.Graph
 
                     bool isVisibleSlot = item.TargetSlot >= 0 && item.TargetSlot < MALSpiderConstants.CarouselMaxItems;
                     double targetAlpha = isVisibleSlot ? 1.0 : 0.0;
-                    double targetScale = isVisibleSlot ? 1.0 : MALSpiderConstants.CarouselScaleMin;
+                    
+                    // Decrease alpha for items further from the center
+                    if (isVisibleSlot)
+                    {
+                        double alphaFactor = 1.0 - (Math.Abs(item.CurrentSlot) * 0.2);
+                        targetAlpha = Math.Clamp(alphaFactor, 0.3, 1.0);
+                    }
+
+                    double targetScale = isVisibleSlot ? (1.0 - (Math.Abs(item.CurrentSlot) * 0.15)) : MALSpiderConstants.CarouselScaleMin;
+                    targetScale = Math.Clamp(targetScale, MALSpiderConstants.CarouselScaleMin, 1.0);
 
                     item.Alpha += (targetAlpha - item.Alpha) * lerp;
                     item.Scale += (targetScale - item.Scale) * lerp;
@@ -86,7 +95,8 @@ namespace MALSpider.Graph
                         continue;
                     }
 
-                    double x = centerX + ((MALSpiderConstants.CarouselMaxItems - 1) / 2.0 - item.CurrentSlot) * MALSpiderConstants.CarouselSpacing;
+                    double dynamicSpacing = Math.Min(MALSpiderConstants.CarouselSpacing, (availableWidth - 150) / (MALSpiderConstants.CarouselMaxItems - 1));
+                    double x = centerX - (item.CurrentSlot * dynamicSpacing);
                     double y = centerY - _renderer.NodeHeight / 2 - 50;
 
                     var nodeVisual = _renderer.CreateNodeBorder(item.Node);
