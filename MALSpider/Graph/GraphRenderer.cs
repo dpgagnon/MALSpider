@@ -323,7 +323,8 @@ namespace MALSpider.Graph
                         TextWrapping = TextWrapping.Wrap,
                         MaxWidth = MALSpiderConstants.ToolTipMaxWidth
                     },
-                    FontSize = MALSpiderConstants.ToolTipFontSize
+                    FontSize = MALSpiderConstants.ToolTipFontSize,
+                    Visibility = Visibility.Collapsed
                 }
             };
 
@@ -448,7 +449,24 @@ namespace MALSpider.Graph
                 HighlightNode(node, true);
 
                 // Set tooltip content
-                var tooltipPanel = new StackPanel { MaxWidth = 400 };
+                var tooltipGrid = new Grid { MaxWidth = 400 };
+
+                if (node.LoadedImage != null)
+                {
+                    var backgroundContainer = new Grid { Background = Brushes.Black };
+                    var backgroundImage = new Image
+                    {
+                        Source = node.LoadedImage,
+                        Stretch = Stretch.UniformToFill,
+                        Opacity = 0.25,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+                    backgroundContainer.Children.Add(backgroundImage);
+                    tooltipGrid.Children.Add(backgroundContainer);
+                }
+
+                var tooltipPanel = new StackPanel { Margin = new Thickness(10) };
 
                 tooltipPanel.Children.Add(new TextBlock
                 {
@@ -506,7 +524,18 @@ namespace MALSpider.Graph
                     });
                 }
 
-                border.ToolTip = new ToolTip { Content = tooltipPanel };
+                tooltipGrid.Children.Add(tooltipPanel);
+
+                if (border.ToolTip is ToolTip existingToolTip)
+                {
+                    existingToolTip.Content = tooltipGrid;
+                    existingToolTip.Padding = new Thickness(0);
+                    existingToolTip.Visibility = Visibility.Visible;
+                }
+                else
+                {
+                    border.ToolTip = new ToolTip { Content = tooltipGrid, Padding = new Thickness(0) };
+                }
             }
         }
 
