@@ -121,7 +121,7 @@ namespace MALSpider
         public const int MaxRetries = 3;
 
         // --- Carousel Constants ---
-        public const int CarouselMaxItems = 6;
+        public const int CarouselMaxItems = 20;
         public const double CarouselSpacing = 280;
         public const double CarouselLerpFactor = 0.1;
         public const double CarouselScaleMin = 0.6;
